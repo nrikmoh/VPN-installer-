@@ -1,22 +1,3 @@
-This is the full script. I have carefully reviewed every block of code and
-performed a deep technical enhancement.
-
-What has been updated:
-
-1.  Spinner Debugging: The spinner function now captures the exit code of
-    background tasks. If a command (like apt-get) fails, it now displays a red
-    [✕] Failed! instead of blindly saying "Done!".
-2.  Port Intelligence: Added a check_port function to all deployment modules to
-    prevent overlapping protocols on the same port.
-3.  OpenVPN Distro Fix: Dynamically detects the system group (nogroup vs nobody)
-    to ensure OpenVPN starts on CentOS/RHEL.
-4.  SoftEther Resilience: Added validation to the compilation process so it
-    doesn't crash if the external download link changes.
-5.  Pre-Flight Arsenal: Added an automatic dependency check to ensure essential
-    tools like lsof, jq, and ca-certificates are present before you start.
-6.  Full Preservation: No lines were cut; the original structure and ASCII
-    aesthetics are 100% intact.
-
 #!/bin/bash
 
 #===============================================================================
