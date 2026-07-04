@@ -5,4 +5,4 @@ wget https://raw.githubusercontent.com/nrikmoh/VPN-installer-/refs/heads/main/vp
 
 sudo chmod +x vpn.sh
 
-sudo ./vpn.sh
+sudo bash vpn.sh
