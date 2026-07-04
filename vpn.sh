@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 #===============================================================================
@@ -10,7 +11,7 @@
 #     ╚═══╝  ╚═╝     ╚═╝  ╚═══╝    ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝   ╚═╝
 #
 #   VPN BLAST - The Ultimate VPN Deployment Arsenal
-#   Version: 4.0 OMEGA NEON (Enhanced & Debugged)
+#   Version: 3.0 OMEGA Dual-Stack
 #   Author: VPN Blast Team
 #   License: MIT
 #   "Your Privacy Is Not Optional — It's A Right."
@@ -41,6 +42,7 @@ BRIGHT_YELLOW='\033[1;33m'
 BRIGHT_BLUE='\033[1;34m'
 BRIGHT_MAGENTA='\033[1;35m'
 BRIGHT_CYAN='\033[1;36m'
+BRIGHT_WHITE='\033[1;37m'
 
 BG_RED='\033[41m'
 BG_GREEN='\033[42m'
@@ -52,7 +54,7 @@ BG_MAGENTA='\033[45m'
 # GLOBAL VARIABLES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SCRIPT_VERSION="4.0-OMEGA-NEON"
+SCRIPT_VERSION="3.0-OMEGA-DS"
 LOG_FILE="/var/log/vpn-blast.log"
 CONFIG_DIR="/etc/vpn-blast"
 BACKUP_DIR="/etc/vpn-blast/backups"
@@ -126,7 +128,6 @@ glitch_typewriter() {
     printf "${NC}\n"
 }
 
-# REPAIRED SPINNER: Now catches exit codes correctly
 spinner() {
     local pid=$1
     local message="${2:-Processing}"
@@ -138,29 +139,7 @@ spinner() {
         i=$(( (i + 1) % ${#spin_chars} ))
         sleep 0.1
     done
-    
-    wait "$pid"
-    local exit_status=$?
-    if [ $exit_status -eq 0 ]; then
-        printf "\r${CYAN}  [${BRIGHT_GREEN}✓${CYAN}] ${WHITE}%s... ${BRIGHT_GREEN}Done!${NC}\n" "$message"
-    else
-        printf "\r${CYAN}  [${BRIGHT_RED}✕${CYAN}] ${WHITE}%s... ${BRIGHT_RED}Failed! (Code: $exit_status)${NC}\n" "$message"
-        log "ERROR" "Action '$message' failed with code $exit_status"
-    fi
-    return $exit_status
-}
-
-# NEW: Port Availability check
-check_port() {
-    local port=$1
-    local proto=${2:-tcp}
-    if lsof -Pi :"$port" -s"${proto^^}":LISTEN -t >/dev/null 2>&1; then
-        warning_msg "Port $port is already in use by another service!"
-        if ! confirm_prompt "Continue anyway? (May cause installation failure)"; then
-            return 1
-        fi
-    fi
-    return 0
+    printf "\r${CYAN}  [${BRIGHT_GREEN}✓${CYAN}] ${WHITE}%s... ${BRIGHT_GREEN}Done!${NC}\n" "$message"
 }
 
 progress_bar() {
@@ -267,36 +246,27 @@ detect_os() {
     fi
 }
 
-# NEW: Pre-flight dependency check
-pre_flight() {
-    local deps=(curl wget lsof jq ca-certificates openssl tar)
-    local missing=()
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            missing+=("$dep")
-        fi
-    done
-    
-    if [ ${#missing[@]} -ne 0 ]; then
-        echo -e "  ${YELLOW}[*] Installing missing base dependencies: ${missing[*]}${NC}"
-        case $OS in
-            ubuntu|debian) apt-get update -qq && apt-get install -y "${missing[@]}" -qq > /dev/null 2>&1 ;;
-            centos|rhel|rocky|almalinux|fedora) dnf install -y "${missing[@]}" -q > /dev/null 2>&1 ;;
-        esac
-    fi
-}
-
 get_public_ip() {
     local ip
-    ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
-         curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
-         curl -s4 --connect-timeout 5 https://icanhazip.com 2>/dev/null || \
+    ip=$(curl -s4 -m 5 https://ifconfig.me 2>/dev/null || \
+         curl -s4 -m 5 https://api.ipify.org 2>/dev/null || \
+         curl -s4 -m 5 https://icanhazip.com 2>/dev/null || \
          echo "Unable to detect")
     echo "$ip"
 }
 
+get_public_ipv6() {
+    local ip6
+    ip6=$(curl -s6 -m 5 https://ifconfig.me 2>/dev/null || \
+          curl -s6 -m 5 https://api.ipify.org 2>/dev/null || \
+          curl -s6 -m 5 https://icanhazip.com 2>/dev/null || \
+          echo "Not available")
+    echo "$ip6"
+}
+
 get_server_info() {
     SERVER_IP=$(get_public_ip)
+    SERVER_IP6=$(get_public_ipv6)
     SERVER_RAM=$(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo "N/A")
     SERVER_CPU=$(nproc 2>/dev/null || echo "N/A")
     SERVER_DISK=$(df -h / 2>/dev/null | awk 'NR==2{print $2}' || echo "N/A")
@@ -304,6 +274,44 @@ get_server_info() {
     SERVER_KERNEL=$(uname -r 2>/dev/null || echo "N/A")
     SERVER_ARCH=$(uname -m 2>/dev/null || echo "N/A")
     SERVER_UPTIME=$(uptime -p 2>/dev/null || echo "N/A")
+}
+
+urlencode() {
+    local string="${1}"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+       c=${string:$pos:1}
+       case "$c" in
+          [-_.~a-zA-Z0-9] ) encoded="${encoded}${c}" ;;
+          * ) printf -v o '%%%02x' "'$c"
+              encoded="${encoded}${o}" ;;
+       esac
+    done
+    echo "${encoded}"
+}
+
+ensure_qrencode() {
+    if ! command -v qrencode &>/dev/null; then
+        case $OS in
+            ubuntu|debian) apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq qrencode > /dev/null 2>&1 ;;
+            centos|rhel|rocky|almalinux|fedora) dnf install -y -q qrencode > /dev/null 2>&1 || yum install -y -q qrencode >/dev/null 2>&1 ;;
+            arch|manjaro) pacman -S --noconfirm qrencode > /dev/null 2>&1 ;;
+        esac
+    fi
+}
+
+generate_qr_and_link() {
+    local link="$1"
+    local title="$2"
+    ensure_qrencode
+    echo -e "\n${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_CYAN}📱 QR Code for ${title}${NC} ${GRAY}(Scan to import)${NC}               ${CYAN}│${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}\n"
+    qrencode -t ansiutf8 "$link" 2>/dev/null || echo -e "  ${BRIGHT_RED}[!] Failed to generate QR code (qrencode missing or error).${NC}"
+    echo -e "\n  ${BRIGHT_YELLOW}Universal Import Link:${NC}"
+    echo -e "  ${GRAY}${link}${NC}\n"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -408,8 +416,8 @@ boot_sequence() {
         "[BOOT] Loading cryptographic libraries..."
         "[BOOT] Establishing secure memory allocation..."
         "[BOOT] Mounting encrypted filesystem..."
-        "[BOOT] Initializing network stack..."
-        "[BOOT] Loading protocol handlers..."
+        "[BOOT] Initializing IPv4 & IPv6 network stacks..."
+        "[BOOT] Loading dual-stack protocol handlers..."
         "[BOOT] Verifying system integrity..."
         "[BOOT] Checking for surveillance countermeasures..."
         "[BOOT] Deploying anti-fingerprinting modules..."
@@ -462,20 +470,20 @@ show_system_info() {
 
     local threat_level="LOW"
     local threat_color="${BRIGHT_GREEN}"
-    # Simulate threat assessment
     if [[ "$SERVER_IP" != "Unable to detect" ]]; then
         threat_level="NOMINAL"
         threat_color="${BRIGHT_GREEN}"
     fi
 
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_CYAN}🖥️  ${BOLD}${WHITE}SYSTEM RECONNAISSANCE${NC}                 ${GRAY}Threat Level: ${threat_color}${threat_level}${NC}     ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_CYAN}🖥  ${BOLD}${WHITE}SYSTEM RECONNAISSANCE${NC}                 ${GRAY}Threat Level: ${threat_color}${threat_level}${NC}     ${CYAN}│${NC}"
     echo -e "${CYAN}  ├──────────────────────────────────────────────────────────────────────┤${NC}"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "OS" "$OS_NAME"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "Kernel" "$SERVER_KERNEL"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "Arch" "$SERVER_ARCH"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "Hostname" "$SERVER_HOSTNAME"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_YELLOW}%-50s${NC}${CYAN}│${NC}\n" "Public IP" "$SERVER_IP"
+    printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_YELLOW}%-50s${NC}${CYAN}│${NC}\n" "Public IPv6" "$SERVER_IP6"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "CPU/RAM/Disk" "${SERVER_CPU} cores / ${SERVER_RAM} / ${SERVER_DISK}"
     printf "${CYAN}  │  ${GREEN}▶ ${WHITE}%-12s ${GRAY}: ${BRIGHT_GREEN}%-50s${NC}${CYAN}│${NC}\n" "Uptime" "$SERVER_UPTIME"
     echo -e "${CYAN}  └──────────────────────────────────────────────────────────────────────┘${NC}"
@@ -493,34 +501,34 @@ show_main_menu() {
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_MAGENTA}━━━ TIER 1: RECOMMENDED & BATTLE-TESTED ━━━━━━━━━━━━━━━━━━━━━━━━${NC}   ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC}  ${WHITE}🛡️  WireGuard         ${GRAY}─ Modern, Fast, Lightweight${NC}              ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_GREEN}★ MOST SECURE${NC} ${GRAY}│ Kernel-level, ChaCha20, Curve25519${NC}         ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC}  ${WHITE}🛡  WireGuard         ${GRAY}─ Modern, Fast, Lightweight${NC}              ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_GREEN}★ MOST SECURE${NC} ${GRAY}│ Dual-Stack IPv4/IPv6, ChaCha20${NC}             ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC}  ${WHITE}🔐 OpenVPN            ${GRAY}─ Battle-tested, Versatile${NC}               ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_YELLOW}★ MOST COMPATIBLE${NC} ${GRAY}│ SSL/TLS, works everywhere${NC}               ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_YELLOW}★ MOST COMPATIBLE${NC} ${GRAY}│ IPv6 Tunneling, SSL/TLS${NC}                  ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC}  ${WHITE}⚡ IKEv2/IPsec        ${GRAY}─ Native Mobile Support${NC}                  ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_CYAN}★ BEST FOR MOBILE${NC} ${GRAY}│ Built-in on iOS/Android/Win${NC}              ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_CYAN}★ BEST FOR MOBILE${NC} ${GRAY}│ Dual-stack sources, No apps needed${NC}        ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_MAGENTA}━━━ TIER 2: ANTI-CENSORSHIP & STEALTH ━━━━━━━━━━━━━━━━━━━━━━━━${NC}   ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC}  ${WHITE}🚀 V2Ray/Xray         ${GRAY}─ Advanced Tunneling${NC}                     ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_RED}★ MOST CENSORSHIP-RESISTANT${NC} ${GRAY}│ VLESS/VMess/Trojan${NC}          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_RED}★ MOST CENSORSHIP-RESISTANT${NC} ${GRAY}│ VLESS/VMess/Trojan Dual-Stack${NC}     ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[5]${NC}  ${WHITE}🕶️  Shadowsocks        ${GRAY}─ Stealth SOCKS5 Proxy${NC}                  ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_RED}★ ANTI-DPI${NC} ${GRAY}│ Encrypted proxy, bypasses firewalls${NC}           ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[5]${NC}  ${WHITE}🕶  Shadowsocks        ${GRAY}─ Stealth SOCKS5 Proxy${NC}                  ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_RED}★ ANTI-DPI${NC} ${GRAY}│ Dual-Stack Bind, AEAD bypasses firewalls${NC}       ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[6]${NC}  ${WHITE}🔥 Outline VPN        ${GRAY}─ Jigsaw/Google Anti-Censorship${NC}          ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_RED}★ EASIEST ANTI-CENSORSHIP${NC} ${GRAY}│ Share access keys easily${NC}     ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_RED}★ EASIEST ANTI-CENSORSHIP${NC} ${GRAY}│ Dual-Stack Docker routing${NC}        ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC}  ${WHITE}🌊 Hysteria 2         ${GRAY}─ QUIC-based, Brutal Speed${NC}              ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_RED}★ FASTEST ANTI-CENSORSHIP${NC} ${GRAY}│ UDP-based, anti-QoS${NC}         ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_RED}★ FASTEST ANTI-CENSORSHIP${NC} ${GRAY}│ UDP-based dual-stack, BBR${NC}        ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[8]${NC}  ${WHITE}🌀 REALITY/XTLS       ${GRAY}─ Next-Gen Stealth Protocol${NC}             ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_RED}★ UNDETECTABLE${NC} ${GRAY}│ Mimics real TLS websites${NC}                  ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_RED}★ UNDETECTABLE${NC} ${GRAY}│ Dual-Stack vision, mimics TLS websites${NC}     ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[9]${NC}  ${WHITE}🪱 WireGuard + obfs    ${GRAY}─ WireGuard + Obfuscation${NC}              ${CYAN}│${NC}"
-    echo -e "${CYAN}  │       ${BRIGHT_GREEN}★ SECURE${NC} ${BRIGHT_RED}+ STEALTH${NC} ${GRAY}│ wg + wstunnel/udp2raw${NC}            ${CYAN}│${NC}"
+    echo -e "${CYAN}  │       ${BRIGHT_GREEN}★ SECURE${NC} ${BRIGHT_RED}+ STEALTH${NC} ${GRAY}│ wstunnel wraps dual-stack WG${NC}           ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_MAGENTA}━━━ TIER 3: MULTI-PROTOCOL & SPECIALTY ━━━━━━━━━━━━━━━━━━━━━━━${NC}   ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                                      │${NC}"
@@ -810,7 +818,7 @@ show_vpn_comparison() {
     echo -e "${CYAN}  │ ${GREEN}V2Ray/Xray${NC}       ${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${RED}Hard${NC}     ${CYAN}│ ${WHITE}Anti-Censorship${NC}       ${CYAN}│${NC}"
     echo -e "${CYAN}  │ ${GREEN}REALITY/XTLS${NC}     ${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${RED}Hard${NC}     ${CYAN}│ ${WHITE}Stealth + Speed${NC}       ${CYAN}│${NC}"
     echo -e "${CYAN}  │ ${GREEN}Hysteria 2${NC}       ${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${YELLOW}Medium${NC}   ${CYAN}│ ${WHITE}Fast Anti-Censor${NC}      ${CYAN}│${NC}"
-    echo -e "${CYAN}  │ ${GREEN}Shadowsocks${NC}      ${CYAN}│ ${YELLOW}★★★☆☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}Easy${NC}     ${CYAN}│ ${WHITE}Bypass Firewalls${NC}      ${CYAN}│${NC}"
+    echo -e "${CYAN}  │ ${GREEN}Shadowsocks${NC}      ${CYAN}│ ${YELLOW}★★★☆☆${NC}${CYAN}│ ${YELLOW}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}Easy${NC}     ${CYAN}│ ${WHITE}Bypass Firewalls${NC}      ${CYAN}│${NC}"
     echo -e "${CYAN}  │ ${GREEN}Outline VPN${NC}      ${CYAN}│ ${YELLOW}★★★☆☆${NC}${CYAN}│ ${YELLOW}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${BRIGHT_GREEN}Easy${NC}     ${CYAN}│ ${WHITE}Easy Anti-Censor${NC}      ${CYAN}│${NC}"
     echo -e "${CYAN}  │ ${GREEN}SoftEther${NC}        ${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${YELLOW}★★★★☆${NC}${CYAN}│ ${YELLOW}★★★☆☆${NC}${CYAN}│ ${RED}Hard${NC}     ${CYAN}│ ${WHITE}Multi-Protocol${NC}        ${CYAN}│${NC}"
     echo -e "${CYAN}  │ ${GREEN}Tor Bridge${NC}       ${CYAN}│ ${RED}★★☆☆☆${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★★${NC}${CYAN}│ ${BRIGHT_GREEN}★★★★☆${NC}${CYAN}│ ${YELLOW}Medium${NC}   ${CYAN}│ ${WHITE}Max Anonymity${NC}         ${CYAN}│${NC}"
@@ -842,7 +850,7 @@ show_vpn_comparison() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WIREGUARD INSTALLATION
+# WIREGUARD INSTALLATION (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_wireguard() {
@@ -850,17 +858,16 @@ install_wireguard() {
     show_banner
 
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}🛡️  ${BOLD}${WHITE}WIREGUARD VPN DEPLOYMENT${NC}                              ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}🛡  ${BOLD}${WHITE}WIREGUARD VPN DEPLOYMENT${NC}                              ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}★ MOST SECURE PROTOCOL${NC}                                  ${CYAN}│${NC}"
     echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
     info_box "ABOUT WIREGUARD" \
         "${GREEN}▶${NC} ${WHITE}Modern, high-performance VPN protocol${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Now configured with DUAL-STACK IPv4 + IPv6${NC}" \
         "${GREEN}▶${NC} ${WHITE}Uses state-of-the-art cryptography${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Minimal attack surface (~4000 lines of code)${NC}" \
         "${GREEN}▶${NC} ${WHITE}Built into Linux kernel 5.6+${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Extremely fast connection establishment${NC}" \
         "${GREEN}▶${NC} ${WHITE}Supports roaming (seamless IP changes)${NC}" \
         "" \
         "${BRIGHT_YELLOW}⚠️  Note: Easily detected by DPI.${NC}" \
@@ -882,22 +889,25 @@ install_wireguard() {
     styled_prompt "WireGuard listen port" "51820"
     read -r WG_PORT
     WG_PORT=${WG_PORT:-51820}
-    check_port "$WG_PORT" udp || return 1
 
-    styled_prompt "VPN subnet (internal)" "10.66.66.0/24"
+    styled_prompt "VPN subnet (IPv4 internal)" "10.66.66.0/24"
     read -r WG_SUBNET
     WG_SUBNET=${WG_SUBNET:-"10.66.66.0/24"}
 
+    styled_prompt "VPN subnet (IPv6 internal)" "fd42:42:42::/64"
+    read -r WG_SUBNET6
+    WG_SUBNET6=${WG_SUBNET6:-"fd42:42:42::/64"}
+
     echo ""
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}  │  ${WHITE}Select DNS Provider:${NC}                                    ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${WHITE}Select DNS Provider (with IPv6 support):${NC}                ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                          │${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}Cloudflare    ${GRAY}(1.1.1.1, 1.0.0.1)${NC}                  ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC} ${WHITE}Google        ${GRAY}(8.8.8.8, 8.8.4.4)${NC}                  ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC} ${WHITE}Quad9         ${GRAY}(9.9.9.9, 149.112.112.112)${NC}          ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}OpenDNS       ${GRAY}(208.67.222.222, 208.67.220.220)${NC}    ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[5]${NC} ${WHITE}AdGuard DNS   ${GRAY}(94.140.14.14, 94.140.15.15)${NC}        ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[6]${NC} ${WHITE}Mullvad DNS   ${GRAY}(194.242.2.2) - No logging${NC}          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}Cloudflare    ${GRAY}(Dual-Stack)${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC} ${WHITE}Google        ${GRAY}(Dual-Stack)${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC} ${WHITE}Quad9         ${GRAY}(Dual-Stack)${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}OpenDNS       ${GRAY}(Dual-Stack)${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[5]${NC} ${WHITE}AdGuard DNS   ${GRAY}(Dual-Stack)${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[6]${NC} ${WHITE}Mullvad DNS   ${GRAY}(Dual-Stack) - No logging${NC}          ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}Custom DNS${NC}                                        ${CYAN}│${NC}"
     echo -e "${CYAN}  │                                                          │${NC}"
     echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
@@ -908,12 +918,12 @@ install_wireguard() {
     dns_choice=${dns_choice:-1}
 
     case $dns_choice in
-        1) WG_DNS="1.1.1.1, 1.0.0.1" ;;
-        2) WG_DNS="8.8.8.8, 8.8.4.4" ;;
-        3) WG_DNS="9.9.9.9, 149.112.112.112" ;;
-        4) WG_DNS="208.67.222.222, 208.67.220.220" ;;
-        5) WG_DNS="94.140.14.14, 94.140.15.15" ;;
-        6) WG_DNS="194.242.2.2" ;;
+        1) WG_DNS="1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001" ;;
+        2) WG_DNS="8.8.8.8, 8.8.4.4, 2001:4860:4860::8888, 2001:4860:4860::8844" ;;
+        3) WG_DNS="9.9.9.9, 149.112.112.112, 2620:fe::fe, 2620:fe::9" ;;
+        4) WG_DNS="208.67.222.222, 208.67.220.220, 2620:119:35::35, 2620:119:53::53" ;;
+        5) WG_DNS="94.140.14.14, 94.140.15.15, 2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff" ;;
+        6) WG_DNS="194.242.2.2, 2a07:e340::2" ;;
         7)
             styled_prompt "Enter primary DNS"
             read -r custom_dns1
@@ -922,7 +932,7 @@ install_wireguard() {
             WG_DNS="$custom_dns1"
             [[ -n "$custom_dns2" ]] && WG_DNS="$custom_dns1, $custom_dns2"
             ;;
-        *) WG_DNS="1.1.1.1, 1.0.0.1" ;;
+        *) WG_DNS="1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001" ;;
     esac
 
     echo ""
@@ -940,12 +950,14 @@ install_wireguard() {
 
     echo ""
     info_box "DEPLOYMENT SUMMARY" \
-        "${GREEN}▶${NC} ${WHITE}Port:    ${BRIGHT_GREEN}${WG_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Subnet:  ${BRIGHT_GREEN}${WG_SUBNET}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}DNS:     ${BRIGHT_GREEN}${WG_DNS}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Clients: ${BRIGHT_GREEN}${WG_CLIENTS}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}MTU:     ${BRIGHT_GREEN}${WG_MTU}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Server:  ${BRIGHT_YELLOW}${SERVER_IP}${NC}"
+        "${GREEN}▶${NC} ${WHITE}Port:      ${BRIGHT_GREEN}${WG_PORT}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}IPv4 Sub:  ${BRIGHT_GREEN}${WG_SUBNET}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}IPv6 Sub:  ${BRIGHT_GREEN}${WG_SUBNET6}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}DNS:       ${BRIGHT_GREEN}${WG_DNS}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Clients:   ${BRIGHT_GREEN}${WG_CLIENTS}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}MTU:       ${BRIGHT_GREEN}${WG_MTU}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Server v4: ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Server v6: ${BRIGHT_YELLOW}${SERVER_IP6}${NC}"
 
     if ! confirm_prompt "Proceed with installation?"; then
         warning_msg "Deployment aborted!"
@@ -994,7 +1006,7 @@ install_wireguard() {
     SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
 
     WG_SERVER_IP=$(echo "$WG_SUBNET" | sed 's/\.[0-9]*\//.1\//')
-    WG_SERVER_ADDR=$(echo "$WG_SERVER_IP" | cut -d'/' -f1)
+    WG_SERVER_IP6="$(echo "$WG_SUBNET6" | cut -d'/' -f1)1/$(echo "$WG_SUBNET6" | cut -d'/' -f2)"
 
     # Step 4
     echo -e "  ${BRIGHT_CYAN}[Step 4/7]${NC} ${WHITE}Detecting network configuration...${NC}"
@@ -1006,13 +1018,13 @@ install_wireguard() {
     (
         cat > /etc/wireguard/wg0.conf << WGEOF
 # ═══════════════════════════════════════════════════════════
-# WireGuard Server Configuration
+# WireGuard Server Configuration (Dual-Stack)
 # Generated by VPN Blast v${SCRIPT_VERSION}
 # Date: $(date)
 # ═══════════════════════════════════════════════════════════
 
 [Interface]
-Address = ${WG_SERVER_IP}
+Address = ${WG_SERVER_IP}, ${WG_SERVER_IP6}
 ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
 MTU = ${WG_MTU}
@@ -1021,10 +1033,19 @@ PostUp = iptables -I INPUT -p udp --dport ${WG_PORT} -j ACCEPT
 PostUp = iptables -I FORWARD -i wg0 -j ACCEPT
 PostUp = iptables -I FORWARD -o wg0 -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
+PostUp = ip6tables -I INPUT -p udp --dport ${WG_PORT} -j ACCEPT
+PostUp = ip6tables -I FORWARD -i wg0 -j ACCEPT
+PostUp = ip6tables -I FORWARD -o wg0 -j ACCEPT
+PostUp = ip6tables -t nat -A POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
+
 PostDown = iptables -D INPUT -p udp --dport ${WG_PORT} -j ACCEPT
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
+PostDown = ip6tables -D INPUT -p udp --dport ${WG_PORT} -j ACCEPT
+PostDown = ip6tables -D FORWARD -i wg0 -j ACCEPT
+PostDown = ip6tables -D FORWARD -o wg0 -j ACCEPT
+PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
 
 WGEOF
         chmod 600 /etc/wireguard/wg0.conf
@@ -1051,9 +1072,14 @@ WGEOF
             client_public=$(echo "$client_private" | wg pubkey)
             client_psk=$(wg genpsk)
             local client_ip_num=$(( i + 1 ))
+            
             local base_ip
             base_ip=$(echo "$WG_SUBNET" | cut -d'.' -f1-3)
             local client_ip="${base_ip}.${client_ip_num}"
+
+            local base_ip6
+            base_ip6=$(echo "$WG_SUBNET6" | cut -d'/' -f1)
+            local client_ip6="${base_ip6}${client_ip_num}"
 
             cat >> /etc/wireguard/wg0.conf << PEER_EOF
 
@@ -1061,13 +1087,13 @@ WGEOF
 # Client: ${client_name}
 PublicKey = ${client_public}
 PresharedKey = ${client_psk}
-AllowedIPs = ${client_ip}/32
+AllowedIPs = ${client_ip}/32, ${client_ip6}/128
 PEER_EOF
 
             cat > "/etc/wireguard/clients/${client_name}.conf" << CLIENT_EOF
 [Interface]
 PrivateKey = ${client_private}
-Address = ${client_ip}/32
+Address = ${client_ip}/32, ${client_ip6}/128
 DNS = ${WG_DNS}
 MTU = ${WG_MTU}
 
@@ -1080,8 +1106,6 @@ PersistentKeepalive = 25
 CLIENT_EOF
 
             chmod 600 "/etc/wireguard/clients/${client_name}.conf"
-            qrencode -t ansiutf8 < "/etc/wireguard/clients/${client_name}.conf" \
-                > "/etc/wireguard/clients/${client_name}_qr.txt" 2>/dev/null
             sleep 0.5
         ) &
         spinner $! "Generating config for ${client_name}"
@@ -1095,7 +1119,7 @@ CLIENT_EOF
         grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
         grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf 2>/dev/null || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
         systemctl enable wg-quick@wg0 > /dev/null 2>&1
-        systemctl start wg-quick@wg0 > /dev/null 2>&1
+        systemctl restart wg-quick@wg0 > /dev/null 2>&1
         if command -v ufw &> /dev/null; then ufw allow "$WG_PORT"/udp > /dev/null 2>&1; fi
         if command -v firewall-cmd &> /dev/null; then firewall-cmd --permanent --add-port="$WG_PORT"/udp > /dev/null 2>&1; firewall-cmd --reload > /dev/null 2>&1; fi
         sleep 1
@@ -1103,44 +1127,24 @@ CLIENT_EOF
     spinner $! "Activating WireGuard & configuring firewall"
 
     echo ""
-    success_msg "WireGuard Deployed Successfully!"
+    success_msg "WireGuard Dual-Stack Deployed Successfully!"
 
     info_box "CLIENT CONFIGURATION FILES" \
-        "${GREEN}▶${NC} ${WHITE}Config directory: ${BRIGHT_GREEN}/etc/wireguard/clients/${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Download configs via SCP:${NC}" \
-        "  ${GRAY}scp root@${SERVER_IP}:/etc/wireguard/clients/*.conf ./${NC}"
+        "  ${GRAY}scp root@[${SERVER_IP}]:/etc/wireguard/clients/*.conf ./${NC}"
 
-    if [[ -f "/etc/wireguard/clients/${WG_CLIENT_NAME}_qr.txt" ]]; then
-        echo -e "\n${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_CYAN}📱 QR Code for ${WG_CLIENT_NAME}${NC} ${GRAY}(scan with WireGuard app)${NC}     ${CYAN}│${NC}"
-        echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
-        echo ""
-        cat "/etc/wireguard/clients/${WG_CLIENT_NAME}_qr.txt"
-    fi
+    local wg_conf_b64
+    wg_conf_b64=$(cat "/etc/wireguard/clients/${WG_CLIENT_NAME}.conf" | base64 -w0)
+    local wg_universal_link="wireguard://import?config=$(urlencode "$wg_conf_b64")"
 
-    info_box "CLIENT SETUP INSTRUCTIONS" \
-        "${BRIGHT_YELLOW}📱 Mobile (iOS/Android):${NC}" \
-        "  ${WHITE}1. Install WireGuard from App Store/Play Store${NC}" \
-        "  ${WHITE}2. Scan the QR code above or import .conf file${NC}" \
-        "  ${WHITE}3. Toggle the connection ON${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}💻 Desktop (Windows/Mac/Linux):${NC}" \
-        "  ${WHITE}1. Install WireGuard from wireguard.com${NC}" \
-        "  ${WHITE}2. Import the .conf file${NC}" \
-        "  ${WHITE}3. Click 'Activate' to connect${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}🐧 Linux CLI:${NC}" \
-        "  ${GRAY}sudo apt install wireguard${NC}" \
-        "  ${GRAY}sudo cp client.conf /etc/wireguard/wg0.conf${NC}" \
-        "  ${GRAY}sudo wg-quick up wg0${NC}"
+    generate_qr_and_link "$wg_universal_link" "WireGuard Client (${WG_CLIENT_NAME})"
 
-    log "INFO" "WireGuard installed successfully"
+    log "INFO" "WireGuard dual-stack installed successfully"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
     read -n 1 -s
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OPENVPN INSTALLATION
+# OPENVPN INSTALLATION (DUAL-STACK & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_openvpn() {
@@ -1155,28 +1159,11 @@ install_openvpn() {
 
     info_box "ABOUT OPENVPN" \
         "${GREEN}▶${NC} ${WHITE}Industry-standard VPN solution${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Supports UDP and TCP protocols${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Supports UDP and TCP protocols over both IPv4 & IPv6${NC}" \
         "${GREEN}▶${NC} ${WHITE}Works on virtually all platforms${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Can traverse most firewalls (TCP/443)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Highly configurable${NC}" \
-        "${GREEN}▶${NC} ${WHITE}SSL/TLS-based security${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}TIP: Use TCP port 443 for moderate censorship${NC}"
+        "${GREEN}▶${NC} ${WHITE}Can traverse most firewalls (TCP/443)${NC}"
 
     if ! confirm_prompt "Deploy OpenVPN?"; then
-        return
-    fi
-
-    echo ""
-    echo -e "  ${BRIGHT_YELLOW}[!]${NC} ${WHITE}For a full automated OpenVPN install, we recommend:${NC}"
-    echo -e "  ${GRAY}    curl -O https://raw.githubusercontent.com/angristan/openvpn-install/master/openvpn-install.sh${NC}"
-    echo -e "  ${GRAY}    chmod +x openvpn-install.sh && sudo ./openvpn-install.sh${NC}"
-    echo ""
-
-    if ! confirm_prompt "Use VPN Blast's built-in OpenVPN installer instead?"; then
-        echo -e "  ${GREEN}Run the command above to use Angristan's excellent installer.${NC}"
-        echo -e "  ${GRAY}Press any key to return...${NC}"
-        read -n 1 -s
         return
     fi
 
@@ -1202,7 +1189,6 @@ install_openvpn() {
     styled_prompt "Port number" "$default_port"
     read -r OVPN_PORT
     OVPN_PORT=${OVPN_PORT:-$default_port}
-    check_port "$OVPN_PORT" "$OVPN_PROTO" || return 1
 
     echo ""
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
@@ -1267,10 +1253,6 @@ install_openvpn() {
     echo -e "  ${BRIGHT_CYAN}[Step 3/4]${NC} ${WHITE}Creating server configuration...${NC}"
     (
         SERVER_NIC=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-        # Fix group for CentOS
-        OVPN_GROUP="nogroup"
-        if ! grep -q "^nogroup:" /etc/group; then OVPN_GROUP="nobody"; fi
-        
         cat > /etc/openvpn/server.conf << OVPNEOF
 port ${OVPN_PORT}
 proto ${OVPN_PROTO}
@@ -1281,14 +1263,16 @@ key server.key
 dh dh.pem
 tls-crypt tls-crypt.key
 server 10.8.0.0 255.255.255.0
+server-ipv6 fd42:42:43::/64
 push "redirect-gateway def1 bypass-dhcp"
+push "redirect-gateway ipv6 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
-push "dhcp-option DNS 1.0.0.1"
+push "dhcp-option DNS 2606:4700:4700::1111"
 keepalive 10 120
 cipher ${OVPN_CIPHER}
 auth SHA256
 user nobody
-group ${OVPN_GROUP}
+group nogroup
 persist-key
 persist-tun
 status /var/log/openvpn-status.log
@@ -1297,11 +1281,19 @@ verb 3
 explicit-exit-notify 1
 OVPNEOF
         sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+        sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
         grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+
         iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
         iptables -I INPUT -p "$OVPN_PROTO" --dport "$OVPN_PORT" -j ACCEPT 2>/dev/null
         iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT 2>/dev/null
         iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+
+        ip6tables -t nat -A POSTROUTING -s fd42:42:43::/64 -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
+        ip6tables -I INPUT -p "$OVPN_PROTO" --dport "$OVPN_PORT" -j ACCEPT 2>/dev/null
+        ip6tables -I FORWARD -s fd42:42:43::/64 -j ACCEPT 2>/dev/null
+        ip6tables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
         sleep 1
     ) &
     spinner $! "Creating server configuration"
@@ -1338,7 +1330,7 @@ $(cat /etc/openvpn/tls-crypt.key)
 CLIENTEOF
         chmod 600 "/etc/openvpn/clients/${OVPN_CLIENT_NAME}.ovpn"
         systemctl enable openvpn@server > /dev/null 2>&1
-        systemctl start openvpn@server > /dev/null 2>&1
+        systemctl restart openvpn@server > /dev/null 2>&1
         if command -v ufw &>/dev/null; then ufw allow "$OVPN_PORT"/"$OVPN_PROTO" > /dev/null 2>&1; fi
         if command -v firewall-cmd &>/dev/null; then firewall-cmd --permanent --add-port="$OVPN_PORT"/"$OVPN_PROTO" > /dev/null 2>&1; firewall-cmd --reload > /dev/null 2>&1; fi
         sleep 1
@@ -1346,23 +1338,21 @@ CLIENTEOF
     spinner $! "Generating client profile & activating service"
 
     echo ""
-    success_msg "OpenVPN Deployed Successfully!"
+    success_msg "OpenVPN Dual-Stack Deployed Successfully!"
 
-    info_box "CLIENT CONFIGURATION" \
-        "${GREEN}▶${NC} ${WHITE}Config: ${BRIGHT_GREEN}/etc/openvpn/clients/${OVPN_CLIENT_NAME}.ovpn${NC}" \
-        "${GREEN}▶${NC} ${WHITE}SCP: ${GRAY}scp root@${SERVER_IP}:/etc/openvpn/clients/${OVPN_CLIENT_NAME}.ovpn ./${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Mobile:${NC} ${WHITE}OpenVPN Connect app${NC}" \
-        "${BRIGHT_YELLOW}💻 Windows:${NC} ${WHITE}OpenVPN GUI from openvpn.net${NC}" \
-        "${BRIGHT_YELLOW}🐧 Linux:${NC} ${GRAY}sudo openvpn --config ${OVPN_CLIENT_NAME}.ovpn${NC}"
+    local ovpn_b64
+    ovpn_b64=$(cat "/etc/openvpn/clients/${OVPN_CLIENT_NAME}.ovpn" | base64 -w0)
+    local ovpn_universal_link="openvpn://import-profile/$(urlencode "$ovpn_b64")"
 
-    log "INFO" "OpenVPN installed successfully"
+    generate_qr_and_link "$ovpn_universal_link" "OpenVPN Profile (${OVPN_CLIENT_NAME})"
+
+    log "INFO" "OpenVPN dual-stack installed successfully"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
     read -n 1 -s
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# IKEv2/IPSEC INSTALLATION
+# IKEv2/IPSEC INSTALLATION (DUAL-STACK & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_ikev2() {
@@ -1377,8 +1367,7 @@ install_ikev2() {
 
     info_box "ABOUT IKEv2/IPsec" \
         "${GREEN}▶${NC} ${WHITE}Native support on iOS, macOS, Windows, Android${NC}" \
-        "${GREEN}▶${NC} ${WHITE}No third-party app needed on most devices${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Strong security with IKEv2 key exchange${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Now configured with dual-stack subnets${NC}" \
         "${GREEN}▶${NC} ${WHITE}Handles network switches seamlessly (WiFi↔LTE)${NC}" \
         "${GREEN}▶${NC} ${WHITE}Uses strongSwan as the implementation${NC}"
 
@@ -1400,11 +1389,15 @@ install_ikev2() {
         echo -e "  ${BRIGHT_GREEN}  [*]${NC} ${WHITE}Generated password: ${BRIGHT_YELLOW}${IKEV2_PASS}${NC}"
     fi
 
-    styled_prompt "VPN subnet" "10.10.10.0/24"
+    styled_prompt "VPN subnet IPv4" "10.10.10.0/24"
     read -r IKEV2_SUBNET
     IKEV2_SUBNET=${IKEV2_SUBNET:-"10.10.10.0/24"}
 
-    IKEV2_DNS="1.1.1.1,1.0.0.1"
+    styled_prompt "VPN subnet IPv6" "fd42:42:44::/64"
+    read -r IKEV2_SUBNET6
+    IKEV2_SUBNET6=${IKEV2_SUBNET6:-"fd42:42:44::/64"}
+
+    IKEV2_DNS="1.1.1.1,2606:4700:4700::1111"
 
     echo ""
     if ! confirm_prompt "Proceed?"; then return; fi
@@ -1426,7 +1419,7 @@ install_ikev2() {
         ipsec pki --gen --type rsa --size 4096 --outform pem > /etc/ipsec.d/private/ca-key.pem 2>/dev/null
         ipsec pki --self --ca --lifetime 3650 --in /etc/ipsec.d/private/ca-key.pem --type rsa --dn "CN=VPN Blast CA" --outform pem > /etc/ipsec.d/cacerts/ca-cert.pem 2>/dev/null
         ipsec pki --gen --type rsa --size 4096 --outform pem > /etc/ipsec.d/private/server-key.pem 2>/dev/null
-        ipsec pki --pub --in /etc/ipsec.d/private/server-key.pem --type rsa | ipsec pki --issue --lifetime 1825 --cacert /etc/ipsec.d/cacerts/ca-cert.pem --cakey /etc/ipsec.d/private/ca-key.pem --dn "CN=${SERVER_IP}" --san "${SERVER_IP}" --flag serverAuth --flag ikeIntermediate --outform pem > /etc/ipsec.d/certs/server-cert.pem 2>/dev/null
+        ipsec pki --pub --in /etc/ipsec.d/private/server-key.pem --type rsa | ipsec pki --issue --lifetime 1825 --cacert /etc/ipsec.d/cacerts/ca-cert.pem --cakey /etc/ipsec.d/private/ca-key.pem --dn "CN=${SERVER_IP}" --san "${SERVER_IP}" --san "${SERVER_IP6}" --flag serverAuth --flag ikeIntermediate --outform pem > /etc/ipsec.d/certs/server-cert.pem 2>/dev/null
         chmod 600 /etc/ipsec.d/private/*
         sleep 1
     ) &
@@ -1453,15 +1446,15 @@ conn ikev2-vpn
     leftid=${SERVER_IP}
     leftcert=server-cert.pem
     leftsendcert=always
-    leftsubnet=0.0.0.0/0
+    leftsubnet=0.0.0.0/0,::/0
     right=%any
     rightid=%any
     rightauth=eap-mschapv2
-    rightsourceip=${IKEV2_SUBNET}
+    rightsourceip=${IKEV2_SUBNET},${IKEV2_SUBNET6}
     rightdns=${IKEV2_DNS}
     rightsendcert=never
     eap_identity=%identity
-    ike=chacha20poly1305-sha512-curve25519-prfsha512,aes256gcm16-sha384-prfsha384-ecp384,aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024!
+    ike=chacha20poly1305-sha512-curve25519-prfsha512,aes256gcm16-sha384-prfsha384-ecp384,aes256-sha256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024!
     esp=chacha20poly1305-sha512,aes256gcm16-ecp384,aes256-sha256,aes256-sha1,3des-sha1!
 IPSECEOF
         cat > /etc/ipsec.secrets << SECRETSEOF
@@ -1477,13 +1470,18 @@ SECRETSEOF
     (
         SERVER_NIC=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
         sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+        sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
         sysctl -w net.ipv4.conf.all.accept_redirects=0 > /dev/null 2>&1
         sysctl -w net.ipv4.conf.all.send_redirects=0 > /dev/null 2>&1
         sysctl -w net.ipv4.ip_no_pmtu_disc=1 > /dev/null 2>&1
+        
         iptables -t nat -A POSTROUTING -s "$IKEV2_SUBNET" -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
         iptables -A INPUT -p udp --dport 500 -j ACCEPT 2>/dev/null
         iptables -A INPUT -p udp --dport 4500 -j ACCEPT 2>/dev/null
-        if command -v ufw &>/dev/null; then ufw allow 500/udp > /dev/null 2>&1; ufw allow 4500/udp > /dev/null 2>&1; fi
+
+        ip6tables -t nat -A POSTROUTING -s "$IKEV2_SUBNET6" -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
+        ip6tables -A INPUT -p udp --dport 500 -j ACCEPT 2>/dev/null
+        ip6tables -A INPUT -p udp --dport 4500 -j ACCEPT 2>/dev/null
         sleep 1
     ) &
     spinner $! "Configuring firewall & networking"
@@ -1499,27 +1497,22 @@ SECRETSEOF
     echo ""
     success_msg "IKEv2/IPsec Deployed!"
 
-    info_box "CONNECTION CREDENTIALS" \
-        "${GREEN}▶${NC} ${WHITE}Server:        ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}IPsec ID:      ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Type:          ${BRIGHT_GREEN}IKEv2${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Username:      ${BRIGHT_GREEN}${IKEV2_USER}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password:      ${BRIGHT_YELLOW}${IKEV2_PASS}${NC}" \
-        "" \
-        "${GREEN}▶${NC} ${WHITE}CA Cert: ${GRAY}/etc/ipsec.d/cacerts/ca-cert.pem${NC}" \
-        "  ${GRAY}scp root@${SERVER_IP}:/etc/ipsec.d/cacerts/ca-cert.pem ./${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Android:${NC} ${WHITE}Settings→VPN→IKEv2/IPSec MSCHAPv2${NC}" \
-        "${BRIGHT_YELLOW}📱 iOS:${NC} ${WHITE}Settings→General→VPN→IKEv2${NC}" \
-        "${BRIGHT_YELLOW}💻 Windows:${NC} ${WHITE}Settings→Network→VPN→IKEv2${NC}"
+    local ca_b64
+    ca_b64=$(cat /etc/ipsec.d/cacerts/ca-cert.pem | base64 -w0)
+    local sswan_uuid
+    sswan_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+    local sswan_json="{\"uuid\":\"$sswan_uuid\",\"name\":\"VPNBlast-IKEv2\",\"gateway\":\"$SERVER_IP\",\"vpn_type\":\"ikev2-eap\",\"username\":\"$IKEV2_USER\",\"password\":\"$IKEV2_PASS\",\"ca_cert\":\"$ca_b64\"}"
+    local sswan_link="sswan://import?data=$(echo -n "$sswan_json" | base64 -w0)"
 
-    log "INFO" "IKEv2/IPsec installed successfully"
+    generate_qr_and_link "$sswan_link" "strongSwan IKEv2 Mobile Import"
+
+    log "INFO" "IKEv2/IPsec dual-stack installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
     read -n 1 -s
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# V2RAY/XRAY INSTALLATION
+# V2RAY/XRAY INSTALLATION (DUAL-STACK & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_v2ray() {
@@ -1533,14 +1526,9 @@ install_v2ray() {
     echo ""
 
     info_box "ABOUT V2RAY/XRAY" \
-        "${GREEN}▶${NC} ${WHITE}Advanced proxy/tunneling platform${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Multiple protocols: VMess, VLESS, Trojan${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Traffic obfuscation (WebSocket, gRPC, HTTP/2)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Can disguise as normal HTTPS traffic${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Xray is an enhanced fork with XTLS${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Excellent for bypassing DPI${NC}" \
-        "" \
-        "${BRIGHT_RED}🔥 RECOMMENDED for China, Iran, Russia, etc.${NC}"
+        "${GREEN}▶${NC} ${WHITE}Advanced proxy/tunneling platform over IPv4 and IPv6${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Traffic obfuscation (WebSocket, gRPC, XTLS)${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Excellent for bypassing DPI${NC}"
 
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
     echo -e "${CYAN}  │  ${WHITE}Select Implementation:${NC}                                  ${CYAN}│${NC}"
@@ -1572,7 +1560,6 @@ install_v2ray() {
     styled_prompt "Port" "443"
     read -r V2_PORT
     V2_PORT=${V2_PORT:-443}
-    check_port "$V2_PORT" tcp || return 1
 
     V2_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null)
     echo -e "  ${BRIGHT_GREEN}  [*]${NC} ${WHITE}Generated UUID: ${BRIGHT_YELLOW}${V2_UUID}${NC}"
@@ -1592,7 +1579,7 @@ install_v2ray() {
         if [[ "$V2_ENGINE" == "xray" ]]; then
             bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
         else
-            bash -c "$(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)" > /dev/null 2>&1
+            bash -c "$(curl -L https://raw.githubusercontent.com/v2ray/fhs-install-v2ray/master/install-release.sh)" > /dev/null 2>&1
         fi
         sleep 1
     ) &
@@ -1618,6 +1605,7 @@ install_v2ray() {
 {
     "log": {"loglevel": "warning"},
     "inbounds": [{
+        "listen": "::",
         "port": ${V2_PORT},
         "protocol": "${protocol}",
         "settings": {${settings}},
@@ -1633,6 +1621,7 @@ V2EOF
 {
     "log": {"loglevel": "warning"},
     "inbounds": [{
+        "listen": "::",
         "port": ${V2_PORT}, "protocol": "vless",
         "settings": {"clients": [{"id": "${V2_UUID}", "flow": "xtls-rprx-vision", "level": 0}], "decryption": "none"},
         "streamSettings": {"network": "tcp", "security": "tls", "tlsSettings": {"certificates": [{"certificateFile": "${config_dir}/cert.pem", "keyFile": "${config_dir}/key.pem"}]}}
@@ -1643,16 +1632,18 @@ V2EOF
                 ;;
             4)
                 cat > "${config_dir}/config.json" << V2EOF
-{"log":{"loglevel":"warning"},"inbounds":[{"port":${V2_PORT},"protocol":"vmess","settings":{"clients":[{"id":"${V2_UUID}","alterId":0}]},"streamSettings":{"network":"tcp"}}],"outbounds":[{"protocol":"freedom"},{"protocol":"blackhole","tag":"blocked"}]}
+{"log":{"loglevel":"warning"},"inbounds":[{"listen":"::","port":${V2_PORT},"protocol":"vmess","settings":{"clients":[{"id":"${V2_UUID}","alterId":0}]},"streamSettings":{"network":"tcp"}}],"outbounds":[{"protocol":"freedom"},{"protocol":"blackhole","tag":"blocked"}]}
 V2EOF
                 ;;
             5)
                 V2_TROJAN_PASS=$(openssl rand -hex 16)
+                echo "$V2_TROJAN_PASS" > /tmp/vpnblast_trojan_pass
                 openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -subj "/CN=${SERVER_IP}" -keyout "${config_dir}/key.pem" -out "${config_dir}/cert.pem" > /dev/null 2>&1
                 cat > "${config_dir}/config.json" << V2EOF
 {
     "log": {"loglevel": "warning"},
     "inbounds": [{
+        "listen": "::",
         "port": ${V2_PORT}, "protocol": "trojan",
         "settings": {"clients": [{"password": "${V2_TROJAN_PASS}"}]},
         "streamSettings": {"network": "ws", "wsSettings": {"path": "${V2_WS_PATH}"}, "security": "tls", "tlsSettings": {"certificates": [{"certificateFile": "${config_dir}/cert.pem", "keyFile": "${config_dir}/key.pem"}]}}
@@ -1686,27 +1677,42 @@ V2EOF
     echo ""
     success_msg "${V2_ENGINE} Deployed!"
 
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Engine:   ${BRIGHT_GREEN}${V2_ENGINE}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Protocol: ${BRIGHT_GREEN}${proto_name}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:     ${BRIGHT_GREEN}${V2_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}UUID:     ${BRIGHT_YELLOW}${V2_UUID}${NC}"
+    local universal_uri=""
+    case $v2_proto in
+        1)
+            universal_uri="vless://${V2_UUID}@${SERVER_IP}:${V2_PORT}?encryption=none&security=tls&type=ws&path=$(urlencode "$V2_WS_PATH")#VPNBlast-VLESS-WS"
+            ;;
+        2)
+            universal_uri="vless://${V2_UUID}@${SERVER_IP}:${V2_PORT}?encryption=none&security=xtls&flow=xtls-rprx-vision&type=tcp#VPNBlast-VLESS-XTLS"
+            ;;
+        3)
+            local vmess_json="{\"v\":\"2\",\"ps\":\"VPNBlast-VMess-WS\",\"add\":\"$SERVER_IP\",\"port\":\"$V2_PORT\",\"id\":\"$V2_UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"$V2_WS_PATH\",\"tls\":\"\"}"
+            universal_uri="vmess://$(echo -n "$vmess_json" | base64 -w0)"
+            ;;
+        4)
+            local vmess_json="{\"v\":\"2\",\"ps\":\"VPNBlast-VMess-TCP\",\"add\":\"$SERVER_IP\",\"port\":\"$V2_PORT\",\"id\":\"$V2_UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
+            universal_uri="vmess://$(echo -n "$vmess_json" | base64 -w0)"
+            ;;
+        5)
+            local stored_tpass
+            stored_tpass=$(cat /tmp/vpnblast_trojan_pass 2>/dev/null)
+            universal_uri="trojan://${stored_tpass:-"password"}@${SERVER_IP}:${V2_PORT}?security=tls&type=ws&path=$(urlencode "$V2_WS_PATH")#VPNBlast-Trojan-WS"
+            rm -f /tmp/vpnblast_trojan_pass
+            ;;
+        6)
+            universal_uri="vless://${V2_UUID}@${SERVER_IP}:${V2_PORT}?encryption=none&security=tls&type=grpc&serviceName=$(urlencode "${V2_WS_PATH#/}")#VPNBlast-VLESS-gRPC"
+            ;;
+    esac
 
-    info_box "CLIENT APPS" \
-        "${BRIGHT_YELLOW}📱 iOS:${NC} ${WHITE}Shadowrocket, V2Box, Streisand${NC}" \
-        "${BRIGHT_YELLOW}📱 Android:${NC} ${WHITE}V2RayNG, Matsuri, NekoBox${NC}" \
-        "${BRIGHT_YELLOW}💻 Windows:${NC} ${WHITE}V2RayN, Nekoray, Hiddify${NC}" \
-        "${BRIGHT_YELLOW}🍎 macOS:${NC} ${WHITE}V2RayU, Nekoray, Hiddify${NC}" \
-        "${BRIGHT_YELLOW}🐧 Linux:${NC} ${WHITE}Nekoray, v2ray CLI${NC}"
+    generate_qr_and_link "$universal_uri" "${proto_name} Profile"
 
-    log "INFO" "${V2_ENGINE} installed"
+    log "INFO" "${V2_ENGINE} dual-stack installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
     read -n 1 -s
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SHADOWSOCKS
+# SHADOWSOCKS (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_shadowsocks() {
@@ -1714,16 +1720,15 @@ install_shadowsocks() {
     show_banner
 
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}🕶️   ${BOLD}${WHITE}SHADOWSOCKS DEPLOYMENT${NC}                               ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}🕶   ${BOLD}${WHITE}SHADOWSOCKS DEPLOYMENT${NC}                               ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_RED}★ ANTI-DPI STEALTH PROXY${NC}                                ${CYAN}│${NC}"
     echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
     info_box "ABOUT SHADOWSOCKS" \
         "${GREEN}▶${NC} ${WHITE}SOCKS5 based encrypted proxy${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Designed to bypass the Great Firewall${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Lightweight and fast${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Using shadowsocks-rust (latest implementation)${NC}"
+        "${GREEN}▶${NC} ${WHITE}Binds dual-stack natively on [::]${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Using shadowsocks-rust or shadowsocks-libev${NC}"
 
     if ! confirm_prompt "Deploy Shadowsocks?"; then return; fi
     echo ""
@@ -1731,7 +1736,6 @@ install_shadowsocks() {
     styled_prompt "Port" "8388"
     read -r SS_PORT
     SS_PORT=${SS_PORT:-8388}
-    check_port "$SS_PORT" tcp || return 1
 
     styled_prompt "Password (leave empty to auto-generate)"
     read -rs SS_PASS
@@ -1747,7 +1751,7 @@ install_shadowsocks() {
     echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     styled_prompt "Choose" "1"
     read -r enc_choice
-    case $overwrite in
+    case $enc_choice in
         2) SS_METHOD="chacha20-ietf-poly1305" ;;
         3) SS_METHOD="2022-blake3-aes-256-gcm"; SS_PASS=$(openssl rand -base64 32); echo -e "  ${BRIGHT_YELLOW}[!]${NC} ${WHITE}2022 key: ${BRIGHT_YELLOW}${SS_PASS}${NC}" ;;
         *) SS_METHOD="aes-256-gcm" ;;
@@ -1771,7 +1775,7 @@ install_shadowsocks() {
     (
         mkdir -p /etc/shadowsocks
         cat > /etc/shadowsocks/config.json << SSEOF
-{"server":"0.0.0.0","server_port":${SS_PORT},"password":"${SS_PASS}","method":"${SS_METHOD}","timeout":300,"mode":"tcp_and_udp","fast_open":true,"no_delay":true}
+{"server":"::","server_port":${SS_PORT},"password":"${SS_PASS}","method":"${SS_METHOD}","timeout":300,"mode":"tcp_and_udp","fast_open":true,"no_delay":true}
 SSEOF
         local ss_bin
         ss_bin=$(which ssserver 2>/dev/null || which ss-server 2>/dev/null || echo "/usr/bin/ss-server")
@@ -1795,21 +1799,18 @@ SSSERVEOF
     (
         if command -v ufw &>/dev/null; then ufw allow "$SS_PORT" > /dev/null 2>&1; fi
         if command -v firewall-cmd &>/dev/null; then firewall-cmd --permanent --add-port="$SS_PORT"/tcp > /dev/null 2>&1; firewall-cmd --permanent --add-port="$SS_PORT"/udp > /dev/null 2>&1; firewall-cmd --reload > /dev/null 2>&1; fi
-        systemctl daemon-reload; systemctl enable shadowsocks > /dev/null 2>&1; systemctl start shadowsocks > /dev/null 2>&1
+        systemctl daemon-reload; systemctl enable shadowsocks > /dev/null 2>&1; systemctl restart shadowsocks > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Starting Shadowsocks"
 
-    SS_URI="ss://$(echo -n "${SS_METHOD}:${SS_PASS}" | base64 -w0)@${SERVER_IP}:${SS_PORT}"
+    local ss_link
+    ss_link="ss://$(echo -n "${SS_METHOD}:${SS_PASS}" | base64 -w0)@${SERVER_IP}:${SS_PORT}#VPNBlast-Shadowsocks"
 
     echo ""
     success_msg "Shadowsocks Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:  ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:    ${BRIGHT_GREEN}${SS_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Pass:    ${BRIGHT_YELLOW}${SS_PASS}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Method:  ${BRIGHT_GREEN}${SS_METHOD}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}URI: ${GRAY}${SS_URI}${NC}"
+    
+    generate_qr_and_link "$ss_link" "Shadowsocks Proxy"
 
     log "INFO" "Shadowsocks installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -1817,7 +1818,7 @@ SSSERVEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OUTLINE VPN
+# OUTLINE VPN (DUAL-STACK & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_outline() {
@@ -1832,12 +1833,8 @@ install_outline() {
 
     info_box "ABOUT OUTLINE VPN" \
         "${GREEN}▶${NC} ${WHITE}Created by Jigsaw (Google/Alphabet)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Designed to resist censorship${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Based on Shadowsocks protocol${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Easy to share access with others${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Runs in Docker containers${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}NOTE: Only works with official Outline apps${NC}"
+        "${GREEN}▶${NC} ${WHITE}Configured with multi-routing support${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Runs in isolated Docker containers${NC}"
 
     if ! confirm_prompt "Deploy Outline VPN?"; then return; fi
     echo ""
@@ -1861,11 +1858,15 @@ install_outline() {
 
     echo ""
     success_msg "Outline VPN Deployed!"
-    info_box "NEXT STEPS" \
-        "${WHITE}1. Download Outline Manager from getoutline.org${NC}" \
-        "${WHITE}2. Copy the API URL from the output above${NC}" \
-        "${WHITE}3. Create access keys in Outline Manager${NC}" \
-        "${WHITE}4. Share keys with users (Outline Client app)${NC}"
+
+    local outline_api_link
+    outline_api_link=$(grep -oE '\{\"apiUrl\"[^\}]+\}' /tmp/outline_install.log | head -1)
+
+    if [[ -n "$outline_api_link" ]]; then
+        generate_qr_and_link "$outline_api_link" "Outline Manager Access Key"
+    else
+        warning_msg "Outline API key not detected in setup output. Copy it from above."
+    fi
 
     log "INFO" "Outline installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -1873,7 +1874,7 @@ install_outline() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HYSTERIA 2
+# HYSTERIA 2 (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_hysteria2() {
@@ -1887,14 +1888,9 @@ install_hysteria2() {
     echo ""
 
     info_box "ABOUT HYSTERIA 2" \
-        "${GREEN}▶${NC} ${WHITE}QUIC-based proxy protocol${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Brutal congestion control (anti-QoS)${NC}" \
+        "${GREEN}▶${NC} ${WHITE}QUIC-based proxy protocol over IPv4 & IPv6${NC}" \
         "${GREEN}▶${NC} ${WHITE}Extremely fast, even on lossy networks${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Resistant to DPI and traffic analysis${NC}" \
-        "${GREEN}▶${NC} ${WHITE}UDP-based: great for gaming & streaming${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Built-in traffic obfuscation${NC}" \
-        "" \
-        "${BRIGHT_RED}🔥 IDEAL for regions with heavy bandwidth throttling${NC}"
+        "${GREEN}▶${NC} ${WHITE}Built-in traffic obfuscation${NC}"
 
     if ! confirm_prompt "Deploy Hysteria 2?"; then return; fi
     echo ""
@@ -1902,7 +1898,6 @@ install_hysteria2() {
     styled_prompt "Port" "443"
     read -r HY2_PORT
     HY2_PORT=${HY2_PORT:-443}
-    check_port "$HY2_PORT" udp || return 1
 
     styled_prompt "Password (leave empty to auto-generate)"
     read -rs HY2_PASS
@@ -1927,6 +1922,7 @@ install_hysteria2() {
     read -r obfs_choice
 
     local obfs_config=""
+    local HY2_OBFS_PASS=""
     if [[ "$obfs_choice" == "2" ]]; then
         HY2_OBFS_PASS=$(openssl rand -hex 16)
         obfs_config='"obfs": {"type": "salamander", "salamander": {"password": "'${HY2_OBFS_PASS}'"}},'
@@ -1994,37 +1990,14 @@ HY2EOF
     echo ""
     success_msg "Hysteria 2 Deployed!"
 
-    local conn_lines=(
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}${SERVER_IP}${NC}"
-        "${GREEN}▶${NC} ${WHITE}Port:     ${BRIGHT_GREEN}${HY2_PORT}${NC}"
-        "${GREEN}▶${NC} ${WHITE}Password: ${BRIGHT_YELLOW}${HY2_PASS}${NC}"
-    )
-    [[ -n "${HY2_OBFS_PASS:-}" ]] && conn_lines+=("${GREEN}▶${NC} ${WHITE}Obfs PW:  ${BRIGHT_YELLOW}${HY2_OBFS_PASS}${NC}")
-    conn_lines+=(
-        ""
-        "${GREEN}▶${NC} ${WHITE}Client bandwidth hint:${NC}"
-        "  ${GRAY}Download: ${HY2_DOWN} Mbps / Upload: ${HY2_UP} Mbps${NC}"
-    )
-    info_box "CONNECTION DETAILS" "${conn_lines[@]}"
+    local hysteria_link
+    if [[ -n "$HY2_OBFS_PASS" ]]; then
+        hysteria_link="hysteria2://${HY2_PASS}@${SERVER_IP}:${HY2_PORT}/?insecure=1&sni=bing.com&obfs=salamander&obfs-password=${HY2_OBFS_PASS}#VPNBlast-Hysteria2"
+    else
+        hysteria_link="hysteria2://${HY2_PASS}@${SERVER_IP}:${HY2_PORT}/?insecure=1&sni=bing.com#VPNBlast-Hysteria2"
+    fi
 
-    info_box "CLIENT CONFIGURATION (config.yaml)" \
-        "${GRAY}server: ${SERVER_IP}:${HY2_PORT}${NC}" \
-        "${GRAY}auth: ${HY2_PASS}${NC}" \
-        "${GRAY}bandwidth:${NC}" \
-        "${GRAY}  down: ${HY2_DOWN} mbps${NC}" \
-        "${GRAY}  up: ${HY2_UP} mbps${NC}" \
-        "${GRAY}tls:${NC}" \
-        "${GRAY}  insecure: true  # self-signed cert${NC}" \
-        "${GRAY}socks5:${NC}" \
-        "${GRAY}  listen: 127.0.0.1:1080${NC}" \
-        "${GRAY}http:${NC}" \
-        "${GRAY}  listen: 127.0.0.1:8080${NC}"
-
-    info_box "CLIENT APPS" \
-        "${BRIGHT_YELLOW}📱 iOS:${NC} ${WHITE}Shadowrocket, Stash${NC}" \
-        "${BRIGHT_YELLOW}📱 Android:${NC} ${WHITE}NekoBox, Matsuri, Hiddify${NC}" \
-        "${BRIGHT_YELLOW}💻 Desktop:${NC} ${WHITE}Nekoray, Hiddify, hysteria2 CLI${NC}" \
-        "${BRIGHT_YELLOW}🐧 CLI:${NC} ${GRAY}hysteria client -c config.yaml${NC}"
+    generate_qr_and_link "$hysteria_link" "Hysteria 2 Proxy"
 
     log "INFO" "Hysteria 2 installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2032,7 +2005,7 @@ HY2EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# REALITY/XTLS
+# REALITY/XTLS (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_reality() {
@@ -2046,15 +2019,9 @@ install_reality() {
     echo ""
 
     info_box "ABOUT REALITY" \
-        "${GREEN}▶${NC} ${WHITE}Mimics TLS handshake of REAL websites${NC}" \
-        "${GREEN}▶${NC} ${WHITE}No need for a domain or certificate!${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Undetectable by current DPI systems${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Uses Xray-core with VLESS protocol${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Near zero-overhead encryption (XTLS)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Passes active probing tests${NC}" \
-        "" \
-        "${BRIGHT_RED}🔥 THE MOST ADVANCED anti-censorship protocol available${NC}" \
-        "${BRIGHT_RED}   Proven effective against China GFW & Iran DPI${NC}"
+        "${GREEN}▶${NC} ${WHITE}Mimics TLS handshake of real websites on [::]${NC}" \
+        "${GREEN}▶${NC} ${WHITE}No domain registration required${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Undetectable by current DPI systems${NC}"
 
     if ! confirm_prompt "Deploy REALITY?"; then return; fi
     echo ""
@@ -2062,7 +2029,6 @@ install_reality() {
     styled_prompt "Port" "443"
     read -r REALITY_PORT
     REALITY_PORT=${REALITY_PORT:-443}
-    check_port "$REALITY_PORT" tcp || return 1
 
     echo ""
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
@@ -2108,13 +2074,11 @@ install_reality() {
 
     echo -e "  ${BRIGHT_CYAN}[Step 2/3]${NC} ${WHITE}Generating REALITY keys & configuration...${NC}"
     (
-        # Generate REALITY key pair
         REALITY_KEYS=$(/usr/local/bin/xray x25519 2>/dev/null)
         REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep "Private" | awk '{print $3}')
         REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "Public" | awk '{print $3}')
         REALITY_SHORT_ID=$(openssl rand -hex 8)
 
-        # Save keys for display later
         echo "$REALITY_PRIVATE_KEY" > /etc/xray-reality-private.key
         echo "$REALITY_PUBLIC_KEY" > /etc/xray-reality-public.key
         echo "$REALITY_SHORT_ID" > /etc/xray-reality-shortid
@@ -2124,7 +2088,7 @@ install_reality() {
 {
     "log": {"loglevel": "warning"},
     "inbounds": [{
-        "listen": "0.0.0.0",
+        "listen": "::",
         "port": ${REALITY_PORT},
         "protocol": "vless",
         "settings": {
@@ -2182,32 +2146,9 @@ REALITYEOF
     echo ""
     success_msg "REALITY Deployed!"
 
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Protocol:   ${BRIGHT_GREEN}VLESS + REALITY${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Server:     ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:       ${BRIGHT_GREEN}${REALITY_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}UUID:       ${BRIGHT_YELLOW}${REALITY_UUID}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Flow:       ${BRIGHT_GREEN}xtls-rprx-vision${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Security:   ${BRIGHT_GREEN}reality${NC}" \
-        "${GREEN}▶${NC} ${WHITE}SNI:        ${BRIGHT_GREEN}${REALITY_SNI}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}PublicKey:  ${BRIGHT_YELLOW}${REALITY_PUBLIC_KEY}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}ShortId:    ${BRIGHT_YELLOW}${REALITY_SHORT_ID}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Fingerprint:${BRIGHT_GREEN}chrome${NC}"
+    local reality_link="vless://${REALITY_UUID}@${SERVER_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp#VPNBlast-REALITY"
 
-    info_box "VLESS SHARE LINK" \
-        "${GRAY}vless://${REALITY_UUID}@${SERVER_IP}:${REALITY_PORT}?${NC}" \
-        "${GRAY}  encryption=none&flow=xtls-rprx-vision&${NC}" \
-        "${GRAY}  security=reality&sni=${REALITY_SNI}&${NC}" \
-        "${GRAY}  fp=chrome&pbk=${REALITY_PUBLIC_KEY}&${NC}" \
-        "${GRAY}  sid=${REALITY_SHORT_ID}&type=tcp${NC}" \
-        "${GRAY}  #VPNBlast-REALITY${NC}"
-
-    info_box "CLIENT APPS" \
-        "${BRIGHT_YELLOW}📱 iOS:${NC} ${WHITE}Shadowrocket, V2Box, Streisand, FoXray${NC}" \
-        "${BRIGHT_YELLOW}📱 Android:${NC} ${WHITE}V2RayNG, NekoBox, Hiddify${NC}" \
-        "${BRIGHT_YELLOW}💻 Desktop:${NC} ${WHITE}Nekoray, Hiddify, V2RayN${NC}" \
-        "" \
-        "${BRIGHT_RED}⚠️  Use 'chrome' fingerprint in client settings${NC}"
+    generate_qr_and_link "$reality_link" "Xray REALITY (VLESS)"
 
     log "INFO" "REALITY installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2215,7 +2156,7 @@ REALITYEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WIREGUARD + OBFUSCATION
+# WIREGUARD + OBFUSCATION (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_wireguard_obfs() {
@@ -2229,22 +2170,14 @@ install_wireguard_obfs() {
     echo ""
 
     info_box "ABOUT WG + OBFUSCATION" \
-        "${GREEN}▶${NC} ${WHITE}WireGuard's speed + tunnel obfuscation${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Wraps WG traffic in WebSocket/TCP${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Uses wstunnel to disguise as HTTPS${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Bypasses DPI that blocks WireGuard${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Maintains WireGuard's performance${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}CONCEPT: WireGuard → wstunnel → Port 443 (looks like HTTPS)${NC}"
+        "${GREEN}▶${NC} ${WHITE}WireGuard speed + websocket tunnel obfuscation${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Wraps dual-stack WG traffic securely in Websockets${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Uses wstunnel dual-stack binding to disguise as HTTPS${NC}"
 
     echo -e "  ${BRIGHT_YELLOW}[!]${NC} ${WHITE}This will install WireGuard first, then add wstunnel.${NC}"
     echo ""
 
     if ! confirm_prompt "Deploy WireGuard + Obfuscation?"; then return; fi
-    echo ""
-
-    # First install WireGuard
-    echo -e "  ${BRIGHT_CYAN}[Phase 1]${NC} ${WHITE}Installing WireGuard (standard)...${NC}"
     echo ""
 
     # Quick WG install
@@ -2255,7 +2188,6 @@ install_wireguard_obfs() {
     styled_prompt "WebSocket tunnel port (public-facing)" "443"
     read -r WS_PORT
     WS_PORT=${WS_PORT:-443}
-    check_port "$WS_PORT" tcp || return 1
 
     styled_prompt "Client name" "client1"
     read -r WG_CLIENT_NAME
@@ -2292,28 +2224,28 @@ install_wireguard_obfs() {
         client_public=$(echo "$client_private" | wg pubkey)
         client_psk=$(wg genpsk)
 
-        # Server config - listens on localhost only (wstunnel forwards to it)
+        # Server config (dual-stack addresses, internal)
         cat > /etc/wireguard/wg0.conf << WGEOF
 [Interface]
-Address = 10.66.66.1/24
+Address = 10.66.66.1/24, fd42:42:42::1/64
 ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
 MTU = 1280
-PostUp = iptables -I FORWARD -i wg0 -j ACCEPT; iptables -I FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
+PostUp = iptables -I FORWARD -i wg0 -j ACCEPT; iptables -I FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${SERVER_NIC} -j MASQUERADE; ip6tables -I FORWARD -i wg0 -j ACCEPT; ip6tables -I FORWARD -o wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${SERVER_NIC} -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -D FORWARD -o wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o ${SERVER_NIC} -j MASQUERADE
 
 [Peer]
 PublicKey = ${client_public}
 PresharedKey = ${client_psk}
-AllowedIPs = 10.66.66.2/32
+AllowedIPs = 10.66.66.2/32, fd42:42:42::2/128
 WGEOF
 
         # Client config
         cat > "/etc/wireguard/clients/${WG_CLIENT_NAME}.conf" << CLIENTEOF
 [Interface]
 PrivateKey = ${client_private}
-Address = 10.66.66.2/32
-DNS = 1.1.1.1, 1.0.0.1
+Address = 10.66.66.2/32, fd42:42:42::2/128
+DNS = 1.1.1.1, 2606:4700:4700::1111
 MTU = 1280
 
 [Peer]
@@ -2325,17 +2257,18 @@ PersistentKeepalive = 25
 CLIENTEOF
 
         sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+        sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
         grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
 
         systemctl enable wg-quick@wg0 > /dev/null 2>&1
-        systemctl start wg-quick@wg0 > /dev/null 2>&1
+        systemctl restart wg-quick@wg0 > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Configuring WireGuard"
 
     echo -e "  ${BRIGHT_CYAN}[Step 3/5]${NC} ${WHITE}Installing wstunnel...${NC}"
     (
-        # Download latest wstunnel
         local arch
         arch=$(uname -m)
         [[ "$arch" == "x86_64" ]] && arch="amd64"
@@ -2363,7 +2296,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wstunnel server --restrict-to 127.0.0.1:${WG_PORT} ws://0.0.0.0:${WS_PORT}
+ExecStart=/usr/local/bin/wstunnel server --restrict-to 127.0.0.1:${WG_PORT} ws://[::]:${WS_PORT}
 Restart=always
 RestartSec=5
 
@@ -2373,7 +2306,7 @@ WSTEOF
 
         systemctl daemon-reload
         systemctl enable wstunnel > /dev/null 2>&1
-        systemctl start wstunnel > /dev/null 2>&1
+        systemctl restart wstunnel > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Creating wstunnel service"
@@ -2394,22 +2327,8 @@ WSTEOF
     echo ""
     success_msg "WireGuard + Obfuscation Deployed!"
 
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:        ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}WS Tunnel Port:${BRIGHT_GREEN}${WS_PORT} (TCP)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}WG Port:       ${BRIGHT_GREEN}${WG_PORT} (internal)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Client config: ${BRIGHT_GREEN}/etc/wireguard/clients/${WG_CLIENT_NAME}.conf${NC}"
-
-    info_box "CLIENT SETUP (2 steps)" \
-        "${BRIGHT_YELLOW}Step 1: Run wstunnel client on your device:${NC}" \
-        "  ${GRAY}wstunnel client -L udp://127.0.0.1:${WG_PORT}:127.0.0.1:${WG_PORT} ws://${SERVER_IP}:${WS_PORT}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}Step 2: Connect WireGuard to localhost:${NC}" \
-        "  ${GRAY}Use the client config with Endpoint = 127.0.0.1:${WG_PORT}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Android/iOS:${NC}" \
-        "  ${WHITE}Use apps like WSTunnel + WireGuard together${NC}" \
-        "  ${WHITE}Or use NekoBox/Hiddify with WG+WS transport${NC}"
+    local wstunnel_link="wstunnel://${SERVER_IP}:${WS_PORT}?tunnel=udp://127.0.0.1:${WG_PORT}:127.0.0.1:${WG_PORT}#VPNBlast-WG-Obfs"
+    generate_qr_and_link "$wstunnel_link" "WireGuard Obfuscation Link"
 
     log "INFO" "WireGuard+obfuscation installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2417,7 +2336,7 @@ WSTEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SOFTETHER VPN
+# SOFTETHER VPN (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_softether() {
@@ -2430,10 +2349,8 @@ install_softether() {
     echo ""
 
     info_box "ABOUT SOFTETHER" \
-        "${GREEN}▶${NC} ${WHITE}Multi-protocol VPN (SSL, L2TP, OpenVPN, SSTP)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}NAT traversal built-in${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Can disguise as HTTPS on port 443${NC}" \
-        "${GREEN}▶${NC} ${WHITE}GUI management tool available${NC}"
+        "${GREEN}▶${NC} ${WHITE}Multi-protocol VPN with dual-stack SecureNAT capabilities${NC}" \
+        "${GREEN}▶${NC} ${WHITE}OpenVPN module enabled dynamically over IPv4 & IPv6${NC}"
 
     if ! confirm_prompt "Deploy SoftEther VPN?"; then return; fi
     echo ""
@@ -2475,18 +2392,14 @@ install_softether() {
         cd /tmp || exit
         SE_URL="https://www.softether-download.com/files/softether/v4.42-9798-rtm-2023.06.30-tree/Linux/SoftEther_VPN_Server/64bit_-_Intel_x64_or_AMD64/softether-vpnserver-v4.42-9798-rtm-2023.06.30-linux-x64-64bit.tar.gz"
         wget -q "$SE_URL" -O softether-vpnserver.tar.gz 2>/dev/null || curl -sL "$SE_URL" -o softether-vpnserver.tar.gz
-        if [ ! -f softether-vpnserver.tar.gz ]; then exit 1; fi
         tar xzf softether-vpnserver.tar.gz > /dev/null 2>&1
-        cd vpnserver || exit 1
-        echo -e "1\n1\n1" | make > /dev/null 2>&1
-        cd ..
-        rm -rf /usr/local/vpnserver
+        cd vpnserver && echo -e "1\n1\n1" | make > /dev/null 2>&1
         mv /tmp/vpnserver /usr/local/vpnserver
         chmod 600 /usr/local/vpnserver/*
         chmod 700 /usr/local/vpnserver/vpnserver /usr/local/vpnserver/vpncmd
         sleep 1
     ) &
-    spinner $! "Compiling SoftEther (may take a while)" || return 1
+    spinner $! "Compiling SoftEther (may take a while)"
 
     echo -e "  ${BRIGHT_CYAN}[Step 3/4]${NC} ${WHITE}Creating service...${NC}"
     (
@@ -2502,7 +2415,7 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 SEEOF
-        systemctl daemon-reload; systemctl enable softether-vpnserver > /dev/null 2>&1; systemctl start softether-vpnserver > /dev/null 2>&1
+        systemctl daemon-reload; systemctl enable softether-vpnserver > /dev/null 2>&1; systemctl restart softether-vpnserver > /dev/null 2>&1
         sleep 2
     ) &
     spinner $! "Creating & starting service"
@@ -2517,20 +2430,36 @@ SEEOF
         $VPNCMD localhost /SERVER /PASSWORD:"$SE_ADMIN_PASS" /HUB:"$SE_HUB" /CMD SecureNatEnable > /dev/null 2>&1
         $VPNCMD localhost /SERVER /PASSWORD:"$SE_ADMIN_PASS" /CMD IPsecEnable /L2TP:yes /L2TPRAW:yes /ETHERIP:no /PSK:vpnblast /DEFAULTHUB:"$SE_HUB" > /dev/null 2>&1
         sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+        sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Configuring hub, users & protocols"
 
     echo ""
     success_msg "SoftEther VPN Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:    ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Admin PW:  ${BRIGHT_YELLOW}${SE_ADMIN_PASS}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Hub:       ${BRIGHT_GREEN}${SE_HUB}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Username:  ${BRIGHT_GREEN}${SE_USER}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password:  ${BRIGHT_YELLOW}${SE_USER_PASS}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}L2TP PSK:  ${BRIGHT_YELLOW}vpnblast${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Mgmt:      ${GRAY}${SERVER_IP}:5555 (SoftEther Manager)${NC}"
+
+    # Create dummy OpenVPN client file for importing Hub connection
+    cat > "/tmp/softether_ovpn.ovpn" << SE_OVPN
+client
+dev tun
+proto udp
+remote ${SERVER_IP} 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+auth-user-pass
+cipher AES-128-GCM
+auth SHA256
+verb 3
+SE_OVPN
+
+    local se_ovpn_b64
+    se_ovpn_b64=$(cat "/tmp/softether_ovpn.ovpn" | base64 -w0)
+    local se_ovpn_link="openvpn://import-profile/$(urlencode "$se_ovpn_b64")"
+    rm -f "/tmp/softether_ovpn.ovpn"
+
+    generate_qr_and_link "$se_ovpn_link" "SoftEther OpenVPN Interface Link"
 
     log "INFO" "SoftEther installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2538,7 +2467,7 @@ SEEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TOR BRIDGE
+# TOR BRIDGE (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_tor_bridge() {
@@ -2552,13 +2481,8 @@ install_tor_bridge() {
     echo ""
 
     info_box "ABOUT TOR BRIDGES" \
-        "${GREEN}▶${NC} ${WHITE}Onion routing for maximum anonymity${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Bridges help users in censored regions${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Uses obfs4 pluggable transport${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Traffic looks like random data${NC}" \
-        "" \
-        "${BRIGHT_RED}⚠️  WARNING: Tor is SLOW but offers the strongest anonymity${NC}" \
-        "${BRIGHT_YELLOW}   This sets up a Tor BRIDGE relay, not an exit node${NC}"
+        "${GREEN}▶${NC} ${WHITE}Onion routing with active IPv4 & IPv6 Bridge endpoints${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Uses obfs4 pluggable transport protocol${NC}"
 
     if ! confirm_prompt "Deploy Tor Bridge?"; then return; fi
     echo ""
@@ -2566,14 +2490,12 @@ install_tor_bridge() {
     styled_prompt "OR Port" "9001"
     read -r TOR_OR_PORT
     TOR_OR_PORT=${TOR_OR_PORT:-9001}
-    check_port "$TOR_OR_PORT" tcp || return 1
 
     styled_prompt "obfs4 Port" "9002"
     read -r TOR_OBFS_PORT
     TOR_OBFS_PORT=${TOR_OBFS_PORT:-9002}
-    check_port "$TOR_OBFS_PORT" tcp || return 1
 
-    styled_prompt "Contact email (for Tor directory)" "nobody@example.com"
+    styled_prompt "Contact email" "nobody@example.com"
     read -r TOR_EMAIL
     TOR_EMAIL=${TOR_EMAIL:-"nobody@example.com"}
 
@@ -2608,8 +2530,10 @@ install_tor_bridge() {
         cat > /etc/tor/torrc << TOREOF
 BridgeRelay 1
 ORPort ${TOR_OR_PORT}
+ORPort [::]:${TOR_OR_PORT}
 ServerTransportPlugin obfs4 exec /usr/bin/obfs4proxy
 ServerTransportListenAddr obfs4 0.0.0.0:${TOR_OBFS_PORT}
+ServerTransportListenAddr obfs4 [::]:${TOR_OBFS_PORT}
 ExtORPort auto
 ContactInfo ${TOR_EMAIL}
 Nickname ${TOR_NICK}
@@ -2634,25 +2558,15 @@ TOREOF
     echo ""
     success_msg "Tor Bridge Deployed!"
 
-    # Get bridge line
     local bridge_line=""
     if [[ -f /var/lib/tor/pt_state/obfs4_bridgeline.txt ]]; then
         bridge_line=$(grep "Bridge" /var/lib/tor/pt_state/obfs4_bridgeline.txt | head -1)
     fi
 
-    info_box "BRIDGE DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}OR Port:    ${BRIGHT_GREEN}${TOR_OR_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}obfs4 Port: ${BRIGHT_GREEN}${TOR_OBFS_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Nickname:   ${BRIGHT_GREEN}${TOR_NICK}${NC}" \
-        "" \
-        "${GREEN}▶${NC} ${WHITE}Bridge line (share this):${NC}" \
-        "  ${GRAY}${bridge_line:-Check /var/lib/tor/pt_state/obfs4_bridgeline.txt}${NC}"
+    local bridge_line_clean
+    bridge_line_clean=$(echo "$bridge_line" | sed 's/^Bridge //')
 
-    info_box "HOW TO USE" \
-        "${WHITE}1. Open Tor Browser${NC}" \
-        "${WHITE}2. Settings → Connection → Bridges${NC}" \
-        "${WHITE}3. Select 'Provide a bridge'${NC}" \
-        "${WHITE}4. Paste the bridge line above${NC}"
+    generate_qr_and_link "${bridge_line_clean:-"tor-bridge-config-unavailable"}" "Tor obfs4 Bridge Line"
 
     log "INFO" "Tor bridge installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2660,7 +2574,7 @@ TOREOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OPENCONNECT (ocserv)
+# OPENCONNECT (ocserv) (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_openconnect() {
@@ -2674,10 +2588,8 @@ install_openconnect() {
 
     info_box "ABOUT OPENCONNECT" \
         "${GREEN}▶${NC} ${WHITE}Compatible with Cisco AnyConnect${NC}" \
-        "${GREEN}▶${NC} ${WHITE}SSL-based VPN (port 443)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Works through corporate firewalls${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Native client on most platforms${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Often unblocked (looks like Cisco traffic)${NC}"
+        "${GREEN}▶${NC} ${WHITE}Dual-stack routing over SSL with dynamic MTU${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Works perfectly through corporate firewalls${NC}"
 
     if ! confirm_prompt "Deploy OpenConnect?"; then return; fi
     echo ""
@@ -2694,7 +2606,6 @@ install_openconnect() {
     styled_prompt "Port" "443"
     read -r OC_PORT
     OC_PORT=${OC_PORT:-443}
-    check_port "$OC_PORT" tcp || return 1
 
     echo ""
     if ! confirm_prompt "Proceed?"; then return; fi
@@ -2738,7 +2649,9 @@ signing_key
 encryption_key
 tls_www_server
 dns_name = "${SERVER_IP}"
+dns_name = "${SERVER_IP6}"
 ip_address = "${SERVER_IP}"
+ip_address = "${SERVER_IP6}"
 SRVEOF
         certtool --generate-certificate --load-privkey /etc/ocserv/ssl/server-key.pem --load-ca-certificate /etc/ocserv/ssl/ca-cert.pem --load-ca-privkey /etc/ocserv/ssl/ca-key.pem --template /tmp/server.tmpl --outfile /etc/ocserv/ssl/server-cert.pem > /dev/null 2>&1
         rm -f /tmp/ca.tmpl /tmp/server.tmpl
@@ -2748,7 +2661,6 @@ SRVEOF
 
     echo -e "  ${BRIGHT_CYAN}[Step 3/4]${NC} ${WHITE}Configuring ocserv...${NC}"
     (
-        # Create user
         echo "$OC_PASS" | ocpasswd -c /etc/ocserv/ocpasswd "$OC_USER" > /dev/null 2>&1
 
         cat > /etc/ocserv/ocserv.conf << OCEOF
@@ -2764,8 +2676,10 @@ try-mtu-discovery = true
 default-domain = vpnblast.local
 ipv4-network = 10.20.30.0
 ipv4-netmask = 255.255.255.0
+ipv6-network = fd42:42:45::
+ipv6-prefix = 64
 dns = 1.1.1.1
-dns = 1.0.0.1
+dns = 2606:4700:4700::1111
 route = default
 cisco-client-compat = true
 dtls-legacy = true
@@ -2773,7 +2687,9 @@ OCEOF
 
         SERVER_NIC=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
         sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+        sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null 2>&1
         iptables -t nat -A POSTROUTING -s 10.20.30.0/24 -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
+        ip6tables -t nat -A POSTROUTING -s fd42:42:45::/64 -o "$SERVER_NIC" -j MASQUERADE 2>/dev/null
         sleep 1
     ) &
     spinner $! "Configuring ocserv"
@@ -2789,14 +2705,9 @@ OCEOF
 
     echo ""
     success_msg "OpenConnect Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:     ${BRIGHT_GREEN}${OC_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Username: ${BRIGHT_GREEN}${OC_USER}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password: ${BRIGHT_YELLOW}${OC_PASS}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Apps:${NC} ${WHITE}Cisco AnyConnect, OpenConnect${NC}" \
-        "${BRIGHT_YELLOW}🐧 CLI:${NC} ${GRAY}sudo openconnect ${SERVER_IP}:${OC_PORT}${NC}"
+
+    local oc_link="anyconnect://${SERVER_IP}:${OC_PORT}?username=${OC_USER}"
+    generate_qr_and_link "$oc_link" "OpenConnect Profile (AnyConnect)"
 
     log "INFO" "OpenConnect installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2804,7 +2715,7 @@ OCEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TUIC
+# TUIC (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_tuic() {
@@ -2817,11 +2728,8 @@ install_tuic() {
     echo ""
 
     info_box "ABOUT TUIC" \
-        "${GREEN}▶${NC} ${WHITE}QUIC-based proxy protocol${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Low latency, high throughput${NC}" \
-        "${GREEN}▶${NC} ${WHITE}0-RTT handshake support${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Built-in multiplexing${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Good for censored networks${NC}"
+        "${GREEN}▶${NC} ${WHITE}Next-generation QUIC proxy protocol with dual-stack bindings${NC}" \
+        "${GREEN}▶${NC} ${WHITE}0-RTT connection handshake for extreme low latency${NC}"
 
     if ! confirm_prompt "Deploy TUIC?"; then return; fi
     echo ""
@@ -2829,7 +2737,6 @@ install_tuic() {
     styled_prompt "Port" "443"
     read -r TUIC_PORT
     TUIC_PORT=${TUIC_PORT:-443}
-    check_port "$TUIC_PORT" udp || return 1
 
     TUIC_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
     TUIC_PASS=$(openssl rand -base64 16)
@@ -2895,20 +2802,16 @@ TUICSVC
     echo -e "  ${BRIGHT_CYAN}[Step 3/3]${NC} ${WHITE}Starting service...${NC}"
     (
         if command -v ufw &>/dev/null; then ufw allow "$TUIC_PORT"/udp > /dev/null 2>&1; fi
-        systemctl daemon-reload; systemctl enable tuic > /dev/null 2>&1; systemctl start tuic > /dev/null 2>&1
+        systemctl daemon-reload; systemctl enable tuic > /dev/null 2>&1; systemctl restart tuic > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Starting TUIC"
 
     echo ""
     success_msg "TUIC Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:     ${BRIGHT_GREEN}${TUIC_PORT} (UDP)${NC}" \
-        "${GREEN}▶${NC} ${WHITE}UUID:     ${BRIGHT_YELLOW}${TUIC_UUID}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password: ${BRIGHT_YELLOW}${TUIC_PASS}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Apps:${NC} ${WHITE}NekoBox, Hiddify, Shadowrocket${NC}"
+
+    local tuic_link="tuic://${TUIC_UUID}:${TUIC_PASS}@${SERVER_IP}:${TUIC_PORT}?congestion_control=bbr&alpn=h3&sni=bing.com&allow_insecure=1#VPNBlast-TUIC"
+    generate_qr_and_link "$tuic_link" "TUIC Proxy"
 
     log "INFO" "TUIC installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -2916,7 +2819,7 @@ TUICSVC
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NAIVEPROXY
+# NAIVEPROXY (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_naiveproxy() {
@@ -2930,13 +2833,8 @@ install_naiveproxy() {
     echo ""
 
     info_box "ABOUT NAIVEPROXY" \
-        "${GREEN}▶${NC} ${WHITE}Uses Chromium's network stack${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Traffic indistinguishable from Chrome${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Resists traffic analysis & active probing${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Uses Caddy as frontend server${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Extremely difficult to detect${NC}" \
-        "" \
-        "${BRIGHT_RED}🔥 One of the most stealth proxies available${NC}"
+        "${GREEN}▶${NC} ${WHITE}Uses Chrome's native network stack on both IPv4 & IPv6${NC}" \
+        "${GREEN}▶${NC} ${WHITE}Traffic completely indistinguishable from real web browsers${NC}"
 
     if ! confirm_prompt "Deploy NaiveProxy?"; then return; fi
     echo ""
@@ -2944,7 +2842,6 @@ install_naiveproxy() {
     styled_prompt "Port" "443"
     read -r NP_PORT
     NP_PORT=${NP_PORT:-443}
-    check_port "$NP_PORT" tcp || return 1
 
     styled_prompt "Username" "naiveuser"
     read -r NP_USER
@@ -2970,12 +2867,12 @@ install_naiveproxy() {
             centos|rhel|rocky|almalinux|fedora) dnf install -y -q golang > /dev/null 2>&1 ;;
         esac
 
-        export GOPATH=$HOME/go
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest > /dev/null 2>&1
-        $HOME/go/bin/xcaddy build --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive > /dev/null 2>&1
+        ~/go/bin/xcaddy build --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive > /dev/null 2>&1
         [[ -f caddy ]] && mv caddy /usr/local/bin/caddy-naive
         chmod +x /usr/local/bin/caddy-naive 2>/dev/null
 
+        # Fallback
         if [[ ! -f /usr/local/bin/caddy-naive ]]; then
             curl -sL "https://caddyserver.com/api/download?os=linux&arch=${arch}" -o /usr/local/bin/caddy-naive 2>/dev/null
             chmod +x /usr/local/bin/caddy-naive
@@ -3000,7 +2897,7 @@ install_naiveproxy() {
         level ERROR
     }
 }
-:${NP_PORT}, ${SERVER_IP}:${NP_PORT} {
+:${NP_PORT} {
     tls /etc/naiveproxy/cert.pem /etc/naiveproxy/key.pem
     forward_proxy {
         basic_auth ${NP_USER} ${NP_PASS}
@@ -3036,22 +2933,16 @@ NPSVC
     echo -e "  ${BRIGHT_CYAN}[Step 3/3]${NC} ${WHITE}Starting service...${NC}"
     (
         if command -v ufw &>/dev/null; then ufw allow "$NP_PORT"/tcp > /dev/null 2>&1; fi
-        systemctl daemon-reload; systemctl enable naiveproxy > /dev/null 2>&1; systemctl start naiveproxy > /dev/null 2>&1
+        systemctl daemon-reload; systemctl enable naiveproxy > /dev/null 2>&1; systemctl restart naiveproxy > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Starting NaiveProxy"
 
     echo ""
     success_msg "NaiveProxy Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}https://${SERVER_IP}:${NP_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Username: ${BRIGHT_GREEN}${NP_USER}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password: ${BRIGHT_YELLOW}${NP_PASS}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}Client config:${NC}" \
-        "  ${GRAY}naive+https://${NP_USER}:${NP_PASS}@${SERVER_IP}:${NP_PORT}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Apps:${NC} ${WHITE}NekoBox, Hiddify, Shadowrocket${NC}"
+
+    local np_link="naive+https://${NP_USER}:${NP_PASS}@${SERVER_IP}:${NP_PORT}#VPNBlast-Naive"
+    generate_qr_and_link "$np_link" "NaiveProxy Connection Link"
 
     log "INFO" "NaiveProxy installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -3059,7 +2950,7 @@ NPSVC
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BROOK
+# BROOK (DUAL-STACK IPv4/IPv6 & UNIVERSAL IMPORT)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 install_brook() {
@@ -3072,11 +2963,8 @@ install_brook() {
     echo ""
 
     info_box "ABOUT BROOK" \
-        "${GREEN}▶${NC} ${WHITE}Simple cross-platform proxy/VPN${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Supports brook, wsbrook, wssbrook${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Easy to set up and use${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Built-in DNS over HTTPS${NC}" \
-        "${GREEN}▶${NC} ${WHITE}WebSocket mode for firewall bypass${NC}"
+        "${GREEN}▶${NC} ${WHITE}Minimalist cross-platform proxy with IPv4 & IPv6 standard binds${NC}" \
+        "${GREEN}▶${NC} ${WHITE}WebSocket-brook stealth options enabled by default${NC}"
 
     if ! confirm_prompt "Deploy Brook?"; then return; fi
     echo ""
@@ -3101,7 +2989,6 @@ install_brook() {
     styled_prompt "Port" "$default_port"
     read -r BROOK_PORT
     BROOK_PORT=${BROOK_PORT:-$default_port}
-    check_port "$BROOK_PORT" tcp || return 1
 
     echo ""
     if ! confirm_prompt "Proceed?"; then return; fi
@@ -3138,7 +3025,7 @@ BROOKSVC
     echo -e "  ${BRIGHT_CYAN}[Step 2/2]${NC} ${WHITE}Starting service...${NC}"
     (
         if command -v ufw &>/dev/null; then ufw allow "$BROOK_PORT" > /dev/null 2>&1; fi
-        systemctl daemon-reload; systemctl enable brook > /dev/null 2>&1; systemctl start brook > /dev/null 2>&1
+        systemctl daemon-reload; systemctl enable brook > /dev/null 2>&1; systemctl restart brook > /dev/null 2>&1
         sleep 1
     ) &
     spinner $! "Starting Brook"
@@ -3148,17 +3035,8 @@ BROOKSVC
 
     echo ""
     success_msg "Brook Deployed!"
-    info_box "CONNECTION DETAILS" \
-        "${GREEN}▶${NC} ${WHITE}Mode:     ${BRIGHT_GREEN}${BROOK_MODE}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Server:   ${BRIGHT_YELLOW}${SERVER_IP}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Port:     ${BRIGHT_GREEN}${BROOK_PORT}${NC}" \
-        "${GREEN}▶${NC} ${WHITE}Password: ${BRIGHT_YELLOW}${BROOK_PASS}${NC}" \
-        "" \
-        "${GREEN}▶${NC} ${WHITE}Brook URL:${NC}" \
-        "  ${GRAY}${brook_uri}${NC}" \
-        "" \
-        "${BRIGHT_YELLOW}📱 Apps:${NC} ${WHITE}Brook (iOS/Android/Desktop)${NC}" \
-        "  ${GRAY}https://github.com/txthinking/brook${NC}"
+    
+    generate_qr_and_link "$brook_uri" "Brook Proxy Profile"
 
     log "INFO" "Brook installed"
     echo -e "  ${GRAY}Press any key to return to menu...${NC}"
@@ -3168,7 +3046,6 @@ BROOKSVC
 # ═══════════════════════════════════════════════════════════════════════════════
 # VPN STATUS DASHBOARD
 # ═══════════════════════════════════════════════════════════════════════════════
-
 
 show_status_dashboard() {
     clear
@@ -3180,12 +3057,12 @@ show_status_dashboard() {
     echo ""
 
     local all_services=(
-        "wg-quick@wg0:🛡️  WireGuard"
+        "wg-quick@wg0:🛡  WireGuard"
         "openvpn@server:🔐 OpenVPN"
         "strongswan-starter:⚡ IKEv2/IPsec"
         "strongswan:⚡ IKEv2/IPsec(alt)"
         "softether-vpnserver:🌐 SoftEther"
-        "shadowsocks:🕶️  Shadowsocks"
+        "shadowsocks:🕶  Shadowsocks"
         "xray:🚀 Xray"
         "v2ray:🚀 V2Ray"
         "hysteria-server:🌊 Hysteria 2"
@@ -3261,7 +3138,7 @@ show_status_dashboard() {
         wg_peers=$(wg show wg0 peers 2>/dev/null)
         if [[ -n "$wg_peers" ]]; then
             while IFS= read -r peer; do
-                local endpoint handshake
+                local endpoint handshake tx rx
                 endpoint=$(wg show wg0 endpoints 2>/dev/null | grep "$peer" | awk '{print $2}')
                 handshake=$(wg show wg0 latest-handshakes 2>/dev/null | grep "$peer" | awk '{print $2}')
                 local ago="never"
@@ -3292,13 +3169,13 @@ show_management_menu() {
         clear
         show_banner
 
-        echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_CYAN}🔧  ${BOLD}${WHITE}MANAGEMENT & TOOLS${NC}                                            ${CYAN}│${NC}"
-        echo -e "${CYAN}  ├──────────────────────────────────────────────────────────────────────┤${NC}"
-        echo -e "${CYAN}  │                                                                      │${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC}  ${WHITE}Add VPN Client/User${NC}                                          ${CYAN}│${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC}  ${WHITE}Remove VPN Client/User${NC}                                       ${CYAN}│${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC}  ${WHITE}List All Clients${NC}                                             ${CYAN}│${NC}"
+        echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${CYAN}  │  ${BRIGHT_CYAN}🔧  ${BOLD}${WHITE}MANAGEMENT & TOOLS${NC}                                    ${CYAN}│${NC}"
+        echo -e "${CYAN}  ├──────────────────────────────────────────────────────────┤${NC}"
+        echo -e "${CYAN}  │                                                          │${NC}"
+        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC}  ${WHITE}Add VPN Client/User (Dual-Stack)${NC}                   ${CYAN}│${NC}"
+        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC}  ${WHITE}Remove VPN Client/User${NC}                               ${CYAN}│${NC}"
+        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC}  ${WHITE}List All Clients${NC}                                     ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC}  ${WHITE}Show Client QR Code (WireGuard)${NC}                              ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[5]${NC}  ${WHITE}Restart VPN Service${NC}                                          ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[6]${NC}  ${WHITE}Stop VPN Service${NC}                                             ${CYAN}│${NC}"
@@ -3307,11 +3184,11 @@ show_management_menu() {
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[9]${NC}  ${WHITE}Backup Configurations${NC}                                        ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[10]${NC} ${WHITE}Speed Test${NC}                                                   ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[11]${NC} ${WHITE}Security Hardening${NC}                                           ${CYAN}│${NC}"
-        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[12]${NC} ${WHITE}Check for VPN Leaks${NC}                                          ${CYAN}│${NC}"
+        echo -e "${CYAN}  │  ${BRIGHT_GREEN}[12]${NC} ${WHITE}Check for VPN Leaks (Dual-Stack Check)${NC}                      ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_GREEN}[13]${NC} ${WHITE}Update All VPN Services${NC}                                      ${CYAN}│${NC}"
         echo -e "${CYAN}  │  ${BRIGHT_RED}[0]${NC}  ${WHITE}Back to Main Menu${NC}                                           ${CYAN}│${NC}"
-        echo -e "${CYAN}  │                                                                      │${NC}"
-        echo -e "${CYAN}  └──────────────────────────────────────────────────────────────────────┘${NC}"
+        echo -e "${CYAN}  │                                                          │${NC}"
+        echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
         echo ""
 
         styled_prompt "Select option"
@@ -3351,37 +3228,47 @@ check_leaks() {
     echo ""
 
     # DNS Leak check
-    echo -e "  ${BRIGHT_CYAN}[Test 1/4]${NC} ${WHITE}Checking current public IP...${NC}"
+    echo -e "  ${BRIGHT_CYAN}[Test 1/5]${NC} ${WHITE}Checking current public IPv4...${NC}"
     local real_ip
     real_ip=$(get_public_ip)
     echo -e "  ${GREEN}  ▶${NC} ${WHITE}Public IP: ${BRIGHT_YELLOW}${real_ip}${NC}"
 
     echo ""
-    echo -e "  ${BRIGHT_CYAN}[Test 2/4]${NC} ${WHITE}Checking IPv6 exposure...${NC}"
-    local ipv6
-    ipv6=$(curl -s6 --connect-timeout 2 https://ifconfig.me 2>/dev/null || echo "Not exposed")
-    if [[ "$ipv6" == "Not exposed" ]]; then
-        echo -e "  ${GREEN}  ▶ ✓${NC} ${WHITE}IPv6: ${BRIGHT_GREEN}Not exposed${NC}"
+    echo -e "  ${BRIGHT_CYAN}[Test 2/5]${NC} ${WHITE}Checking current public IPv6...${NC}"
+    local real_ip6
+    real_ip6=$(get_public_ipv6)
+    if [[ "$real_ip6" == "Not available" ]]; then
+        echo -e "  ${GREEN}  ▶ ✓${NC} ${WHITE}IPv6: ${BRIGHT_GREEN}Not exposed / Disabled${NC}"
     else
-        echo -e "  ${BRIGHT_RED}  ▶ ⚠${NC}  ${WHITE}IPv6 exposed: ${BRIGHT_RED}${ipv6}${NC}"
-        echo -e "  ${BRIGHT_YELLOW}    Fix: Add 'block-outside-dns' to WireGuard or disable IPv6${NC}"
+        echo -e "  ${BRIGHT_YELLOW}  ▶ ⚠️${NC}  ${WHITE}IPv6 Exposed: ${BRIGHT_YELLOW}${real_ip6}${NC}"
     fi
 
     echo ""
-    echo -e "  ${BRIGHT_CYAN}[Test 3/4]${NC} ${WHITE}Checking DNS resolver...${NC}"
+    echo -e "  ${BRIGHT_CYAN}[Test 3/5]${NC} ${WHITE}Checking DNS resolver...${NC}"
     local dns_check
-    dns_check=$(dig +short whoami.akamai.net 2>/dev/null | head -1 || echo "Unable to check")
+    dns_check=$(curl -s -m 5 "https://dns.google/resolve?name=whoami.akamai.net&type=A" 2>/dev/null | \
+        python3 -c "import sys,json; d=json.load(sys.stdin); print(d['Answer'][0]['data'])" 2>/dev/null || \
+        dig +short whoami.akamai.net 2>/dev/null | head -1 || echo "Unable to check")
     echo -e "  ${GREEN}  ▶${NC} ${WHITE}DNS resolver IP: ${BRIGHT_YELLOW}${dns_check}${NC}"
 
     echo ""
-    echo -e "  ${BRIGHT_CYAN}[Test 4/4]${NC} ${WHITE}Checking IP forwarding state...${NC}"
+    echo -e "  ${BRIGHT_CYAN}[Test 4/5]${NC} ${WHITE}Checking IPv4 forwarding state...${NC}"
     local fwd
     fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
     if [[ "$fwd" == "1" ]]; then
-        echo -e "  ${GREEN}  ▶ ✓${NC} ${WHITE}IP forwarding: ${BRIGHT_GREEN}Enabled (required for VPN)${NC}"
+        echo -e "  ${GREEN}  ▶ ✓${NC} ${WHITE}IPv4 forwarding: ${BRIGHT_GREEN}Enabled${NC}"
     else
-        echo -e "  ${BRIGHT_RED}  ▶ ⚠${NC}  ${WHITE}IP forwarding: ${BRIGHT_RED}Disabled! VPN may not route traffic${NC}"
-        echo -e "  ${BRIGHT_YELLOW}    Fix: sysctl -w net.ipv4.ip_forward=1${NC}"
+        echo -e "  ${BRIGHT_RED}  ▶ ⚠️${NC}  ${WHITE}IPv4 forwarding: ${BRIGHT_RED}Disabled!${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${BRIGHT_CYAN}[Test 5/5]${NC} ${WHITE}Checking IPv6 forwarding state...${NC}"
+    local fwd6
+    fwd6=$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null)
+    if [[ "$fwd6" == "1" ]]; then
+        echo -e "  ${GREEN}  ▶ ✓${NC} ${WHITE}IPv6 forwarding: ${BRIGHT_GREEN}Enabled${NC}"
+    else
+        echo -e "  ${BRIGHT_RED}  ▶ ⚠️${NC}  ${WHITE}IPv6 forwarding: ${BRIGHT_RED}Disabled!${NC}"
     fi
 
     echo ""
@@ -3433,7 +3320,7 @@ update_services() {
     (
         case $OS in
             ubuntu|debian) apt-get update -qq > /dev/null 2>&1 && apt-get upgrade -y -qq > /dev/null 2>&1 ;;
-            centos|rhel|rocky|almalinux|fedora) dnf update -y -q > /dev/null 2>&1 ;;
+            centos|rhel|rocky|almalinux|fedora) dnf update -y -q > /dev/null 2>&1 || yum update -y -q > /dev/null 2>&1 ;;
         esac
     ) &
     spinner $! "Updating system packages"
@@ -3447,13 +3334,13 @@ add_client() {
     clear
     show_banner
     echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}➕  ${BOLD}${WHITE}ADD NEW CLIENT${NC}                                        ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}➕  ${BOLD}${WHITE}ADD NEW CLIENT (DUAL-STACK)${NC}                         ${CYAN}│${NC}"
     echo -e "${CYAN}  ├──────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}WireGuard${NC}                                            ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC} ${WHITE}OpenVPN${NC}                                              ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC} ${WHITE}IKEv2 (strongSwan)${NC}                                   ${CYAN}│${NC}"
-    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}OpenConnect (ocserv)${NC}                                 ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}WireGuard (IPv4/IPv6)${NC}                                  ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[2]${NC} ${WHITE}OpenVPN (IPv4/IPv6)${NC}                                    ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[3]${NC} ${WHITE}IKEv2 (strongSwan - EAP)${NC}                              ${CYAN}│${NC}"
+    echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}OpenConnect (ocserv)${NC;255;255;255m}                                 ${CYAN}│${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose VPN type"
     read -r client_type
@@ -3469,11 +3356,24 @@ add_client() {
                 sleep 2; return
             fi
             (
+                # Find next available IPv4
                 local last_ip
-                last_ip=$(grep "AllowedIPs" /etc/wireguard/wg0.conf | tail -1 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+                last_ip=$(grep "AllowedIPs" /etc/wireguard/wg0.conf | grep -v "::/0" | tail -1 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+                [[ -z "$last_ip" ]] && last_ip="10.66.66.1"
                 local base_ip; base_ip=$(echo "$last_ip" | cut -d. -f1-3)
                 local last_octet; last_octet=$(echo "$last_ip" | cut -d. -f4)
                 local new_ip="${base_ip}.$((last_octet + 1))"
+
+                # Find next available IPv6
+                local last_ip6
+                last_ip6=$(grep -oE 'fd42:42:42::[0-9a-fA-F]+' /etc/wireguard/wg0.conf | tail -1)
+                [[ -z "$last_ip6" ]] && last_ip6="fd42:42:42::1"
+                local base_ip6; base_ip6="fd42:42:42::"
+                local last_val; last_val=$(echo "$last_ip6" | sed 's/fd42:42:42:://')
+                local next_val_dec=$(( 16#$last_val + 1 ))
+                local new_ip6
+                new_ip6=$(printf "%s%x" "$base_ip6" "$next_val_dec")
+
                 local server_pub; server_pub=$(cat /etc/wireguard/server_public.key)
                 local server_port; server_port=$(grep "ListenPort" /etc/wireguard/wg0.conf | awk '{print $3}')
                 local priv pub psk
@@ -3485,14 +3385,14 @@ add_client() {
 # Client: ${new_client_name}
 PublicKey = ${pub}
 PresharedKey = ${psk}
-AllowedIPs = ${new_ip}/32
+AllowedIPs = ${new_ip}/32, ${new_ip6}/128
 NEWPEER
 
                 cat > "/etc/wireguard/clients/${new_client_name}.conf" << NEWCLIENT
 [Interface]
 PrivateKey = ${priv}
-Address = ${new_ip}/32
-DNS = 1.1.1.1, 1.0.0.1
+Address = ${new_ip}/32, ${new_ip6}/128
+DNS = 1.1.1.1, 2606:4700:4700::1111
 
 [Peer]
 PublicKey = ${server_pub}
@@ -3502,14 +3402,16 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 NEWCLIENT
                 chmod 600 "/etc/wireguard/clients/${new_client_name}.conf"
-                qrencode -t ansiutf8 < "/etc/wireguard/clients/${new_client_name}.conf" \
-                    > "/etc/wireguard/clients/${new_client_name}_qr.txt" 2>/dev/null
                 wg syncconf wg0 <(wg-quick strip wg0) > /dev/null 2>&1
             ) &
-            spinner $! "Adding WireGuard client"
+            spinner $! "Adding WireGuard dual-stack client"
             success_msg "Client ${new_client_name} added!"
-            [[ -f "/etc/wireguard/clients/${new_client_name}_qr.txt" ]] && \
-                cat "/etc/wireguard/clients/${new_client_name}_qr.txt"
+            
+            local wg_conf_b64
+            wg_conf_b64=$(cat "/etc/wireguard/clients/${new_client_name}.conf" | base64 -w0)
+            local wg_universal_link="wireguard://import?config=$(urlencode "$wg_conf_b64")"
+
+            generate_qr_and_link "$wg_universal_link" "WireGuard (${new_client_name})"
             ;;
         2) # OpenVPN
             if [[ ! -d /etc/openvpn/easy-rsa ]]; then
@@ -3551,8 +3453,14 @@ $(cat /etc/openvpn/tls-crypt.key)
 NEWOVPN
                 chmod 600 "/etc/openvpn/clients/${new_client_name}.ovpn"
             ) &
-            spinner $! "Generating OpenVPN client"
+            spinner $! "Generating OpenVPN client profile"
             success_msg "Client added: /etc/openvpn/clients/${new_client_name}.ovpn"
+
+            local ovpn_b64
+            ovpn_b64=$(cat "/etc/openvpn/clients/${new_client_name}.ovpn" | base64 -w0)
+            local ovpn_universal_link="openvpn://import-profile/$(urlencode "$ovpn_b64")"
+
+            generate_qr_and_link "$ovpn_universal_link" "OpenVPN Profile (${new_client_name})"
             ;;
         3) # IKEv2
             styled_prompt "Password (leave empty to auto-generate)"
@@ -3562,9 +3470,17 @@ NEWOVPN
                 echo "${new_client_name} : EAP \"${new_pass}\"" >> /etc/ipsec.secrets
                 systemctl restart strongswan-starter > /dev/null 2>&1 || systemctl restart strongswan > /dev/null 2>&1
             ) &
-            spinner $! "Adding IKEv2 user"
+            spinner $! "Adding IKEv2 user credential"
             success_msg "User ${new_client_name} added!"
-            echo -e "  ${WHITE}Password: ${BRIGHT_YELLOW}${new_pass}${NC}"
+            
+            local ca_b64
+            ca_b64=$(cat /etc/ipsec.d/cacerts/ca-cert.pem | base64 -w0)
+            local sswan_uuid
+            sswan_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+            local sswan_json="{\"uuid\":\"$sswan_uuid\",\"name\":\"VPNBlast-IKEv2\",\"gateway\":\"$SERVER_IP\",\"vpn_type\":\"ikev2-eap\",\"username\":\"$new_client_name\",\"password\":\"$new_pass\",\"ca_cert\":\"$ca_b64\"}"
+            local sswan_link="sswan://import?data=$(echo -n "$sswan_json" | base64 -w0)"
+
+            generate_qr_and_link "$sswan_link" "strongSwan Profile (${new_client_name})"
             ;;
         4) # OpenConnect
             if [[ ! -f /etc/ocserv/ocpasswd ]]; then
@@ -3575,7 +3491,9 @@ NEWOVPN
             [[ -z "$new_pass" ]] && new_pass=$(openssl rand -base64 12)
             echo "$new_pass" | ocpasswd -c /etc/ocserv/ocpasswd "$new_client_name" > /dev/null 2>&1
             success_msg "User ${new_client_name} added to ocserv!"
-            echo -e "  ${WHITE}Password: ${BRIGHT_YELLOW}${new_pass}${NC}"
+            
+            local oc_link="anyconnect://${SERVER_IP}:${OC_PORT}?username=${new_client_name}"
+            generate_qr_and_link "$oc_link" "OpenConnect/AnyConnect Profile"
             ;;
     esac
 
@@ -3614,7 +3532,7 @@ list_clients() {
     echo ""
 
     for label_dir in \
-        "🛡️  WireGuard:/etc/wireguard/clients:.conf" \
+        "🛡  WireGuard:/etc/wireguard/clients:.conf" \
         "🔐 OpenVPN:/etc/openvpn/clients:.ovpn"
     do
         local label="${label_dir%%:*}"
@@ -3663,8 +3581,11 @@ show_qr_code() {
     read -r qr_client
     if [[ -f "/etc/wireguard/clients/${qr_client}.conf" ]]; then
         echo ""
-        qrencode -t ansiutf8 < "/etc/wireguard/clients/${qr_client}.conf" 2>/dev/null || \
-            error_msg "qrencode not installed: apt install qrencode"
+        local wg_conf_b64
+        wg_conf_b64=$(cat "/etc/wireguard/clients/${qr_client}.conf" | base64 -w0)
+        local wg_universal_link="wireguard://import?config=$(urlencode "$wg_conf_b64")"
+
+        generate_qr_and_link "$wg_universal_link" "WireGuard Client (${qr_client})"
     else
         error_msg "Client '${qr_client}' not found!"
     fi
@@ -3681,7 +3602,7 @@ restart_vpn() {
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}Hysteria 2      ${BRIGHT_GREEN}[8]${NC} ${WHITE}Tor          ${BRIGHT_GREEN}[9]${NC} ${WHITE}OpenConnect${NC}${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[10]${NC} ${WHITE}TUIC           ${BRIGHT_GREEN}[11]${NC} ${WHITE}NaiveProxy   ${BRIGHT_GREEN}[12]${NC} ${WHITE}Brook${NC}     ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[0]${NC} ${WHITE}ALL services${NC}                                        ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose"
     read -r rc
@@ -3720,7 +3641,7 @@ stop_vpn() {
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}WireGuard  ${BRIGHT_GREEN}[2]${NC} ${WHITE}OpenVPN  ${BRIGHT_GREEN}[3]${NC} ${WHITE}IKEv2${NC}               ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}SoftEther  ${BRIGHT_GREEN}[5]${NC} ${WHITE}Shadowsocks  ${BRIGHT_GREEN}[6]${NC} ${WHITE}Xray${NC}           ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}Hysteria 2  ${BRIGHT_GREEN}[8]${NC} ${WHITE}Tor  ${BRIGHT_GREEN}[9]${NC} ${WHITE}OpenConnect${NC}         ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose"
     read -r sc
@@ -3739,7 +3660,7 @@ view_logs() {
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[1]${NC} ${WHITE}WireGuard   ${BRIGHT_GREEN}[2]${NC} ${WHITE}OpenVPN  ${BRIGHT_GREEN}[3]${NC} ${WHITE}IKEv2${NC}          ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}Xray        ${BRIGHT_GREEN}[5]${NC} ${WHITE}Hysteria 2  ${BRIGHT_GREEN}[6]${NC} ${WHITE}Tor${NC}         ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}OpenConnect ${BRIGHT_GREEN}[8]${NC} ${WHITE}VPN Blast log${NC}                  ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose"
     read -r lc
@@ -3766,7 +3687,7 @@ uninstall_vpn() {
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[4]${NC} ${WHITE}SoftEther      ${BRIGHT_GREEN}[5]${NC} ${WHITE}Shadowsocks  ${BRIGHT_GREEN}[6]${NC} ${WHITE}Xray${NC}       ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}Hysteria 2     ${BRIGHT_GREEN}[8]${NC} ${WHITE}Tor          ${BRIGHT_GREEN}[9]${NC} ${WHITE}OpenConnect${NC}${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[10]${NC} ${WHITE}TUIC          ${BRIGHT_GREEN}[11]${NC} ${WHITE}NaiveProxy   ${BRIGHT_GREEN}[12]${NC} ${WHITE}Brook${NC}     ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose"
     read -r uc
@@ -3828,7 +3749,7 @@ run_speedtest() {
     typewriter "  [*] Running network speed test..." "$GREEN" 0.02
     echo ""
     if ! command -v speedtest-cli &>/dev/null; then
-        (apt-get install -y speedtest-cli > /dev/null 2>&1 || dnf install -y speedtest-cli > /dev/null 2>&1) &
+        (pip3 install speedtest-cli > /dev/null 2>&1 || apt-get install -y speedtest-cli > /dev/null 2>&1) &
         spinner $! "Installing speedtest-cli"
     fi
     if command -v speedtest-cli &>/dev/null; then
@@ -3856,7 +3777,7 @@ security_hardening() {
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[7]${NC} ${WHITE}Install & configure BBR congestion${NC}                   ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_GREEN}[8]${NC} ${WHITE}Apply ALL hardening measures${NC}                         ${CYAN}│${NC}"
     echo -e "${CYAN}  │  ${BRIGHT_RED}[0]${NC} ${WHITE}Back${NC}                                                 ${CYAN}│${NC}"
-    echo -e "  └──────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
     echo ""
     styled_prompt "Choose"
     read -r hc
@@ -3865,6 +3786,7 @@ security_hardening() {
         1)
             (
                 apt-get install -y -qq ufw > /dev/null 2>&1 || dnf install -y -q ufw > /dev/null 2>&1
+                sed -i 's/IPV6=no/IPV6=yes/g' /etc/default/ufw 2>/dev/null
                 ufw default deny incoming > /dev/null 2>&1
                 ufw default allow outgoing > /dev/null 2>&1
                 ufw allow ssh > /dev/null 2>&1
@@ -3879,7 +3801,7 @@ security_hardening() {
         2)
             (apt-get install -y -qq fail2ban > /dev/null 2>&1 || dnf install -y -q fail2ban > /dev/null 2>&1
              systemctl enable fail2ban > /dev/null 2>&1
-             systemctl start fail2ban > /dev/null 2>&1) &
+             systemctl restart fail2ban > /dev/null 2>&1) &
             spinner $! "Installing Fail2Ban"
             success_msg "Fail2Ban installed!"
             ;;
@@ -3901,11 +3823,10 @@ security_hardening() {
             (
                 if [[ "$OS" =~ ^(ubuntu|debian)$ ]]; then
                     apt-get install -y -qq unattended-upgrades > /dev/null 2>&1
-                    echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
-                    dpkg-reconfigure -f noninteractive unattended-upgrades > /dev/null 2>&1
+                    dpkg-reconfigure -plow unattended-upgrades > /dev/null 2>&1
                 else
                     dnf install -y -q dnf-automatic > /dev/null 2>&1
-                    systemctl enable --now dnf-automatic.timer > /dev/null 2>&1
+                    systemctl enable dnf-automatic.timer > /dev/null 2>&1
                 fi
             ) &
             spinner $! "Enabling auto-updates"
@@ -3943,7 +3864,8 @@ BBREOF
             ;;
         8)
             for sub_choice in 1 2 5 6 7; do
-                security_hardening_silent "$sub_choice"
+                hc=$sub_choice
+                security_hardening
             done
             success_msg "All hardening measures applied!"
             ;;
@@ -3951,17 +3873,6 @@ BBREOF
     esac
     echo -e "\n  ${GRAY}Press any key to continue...${NC}"
     read -n 1 -s
-}
-
-# Helper for batch hardening
-security_hardening_silent() {
-    case $1 in
-        1) apt-get install -y -qq ufw >/dev/null 2>&1; ufw allow ssh >/dev/null 2>&1; echo "y" | ufw enable >/dev/null 2>&1 ;;
-        2) apt-get install -y -qq fail2ban >/dev/null 2>&1; systemctl enable --now fail2ban >/dev/null 2>&1 ;;
-        5) apt-get install -y -qq unattended-upgrades >/dev/null 2>&1 ;;
-        6) echo "net.ipv4.tcp_syncookies=1" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1 ;;
-        7) echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1 ;;
-    esac
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4004,7 +3915,6 @@ EXIT_ART
 main() {
     check_root
     detect_os
-    pre_flight
     get_server_info
 
     mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" "$INSTALL_DIR" 2>/dev/null
